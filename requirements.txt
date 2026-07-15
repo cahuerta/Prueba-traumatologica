@@ -4,3 +4,4 @@ supabase==2.15.1
 pyjwt==2.9.0
 bcrypt==4.2.0
 pydantic[email]==2.9.2
+anthropic==0.40.0
