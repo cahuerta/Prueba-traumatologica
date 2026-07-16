@@ -13,7 +13,7 @@ app = FastAPI(title="Examen Musculoesquelético API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.vercel\.app|http://localhost:\d+",
+    allow_origin_regex=r"https://.*\.vercel\.app|https://traumatologiaultal2026\.icarticular\.cl|http://localhost:\d+",
     allow_methods=["*"],
     allow_headers=["*"],
 )
