@@ -1,6 +1,7 @@
 """
 routers/auth.py
 Auth propio del proyecto — independiente de ICA y de Supabase Auth.
+Login por RUT (no email).
 
 Variables de entorno esperadas (Render):
   SUPABASE_URL
@@ -13,7 +14,7 @@ import os
 import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Depends, Header
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from supabase import create_client, Client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -36,7 +37,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 def crear_token(interrogador: dict) -> str:
     payload = {
         "sub": interrogador["id"],
-        "email": interrogador["email"],
+        "rut": interrogador["rut"],
         "rol": interrogador["rol"],
         # sin expiración por ahora — se define más adelante
     }
@@ -60,11 +61,11 @@ def requiere_admin(interrogador: dict = Depends(get_current_interrogador)) -> di
 
 # ---------------- MODELOS ----------------
 class LoginIn(BaseModel):
-    email: EmailStr
+    rut: str
     password: str
 
 class CrearInterrogadorIn(BaseModel):
-    email: EmailStr
+    rut: str
     password: str
     nombre: str
     rol: str = "interrogador"  # "admin" | "interrogador"
@@ -73,13 +74,13 @@ class CrearInterrogadorIn(BaseModel):
 # ---------------- ENDPOINTS ----------------
 @router.post("/login")
 def login(body: LoginIn):
-    res = sb.table("interrogadores").select("*").eq("email", body.email).eq("activo", True).execute()
+    res = sb.table("interrogadores").select("*").eq("rut", body.rut).eq("activo", True).execute()
     if not res.data:
-        raise HTTPException(401, "Email o contraseña incorrectos")
+        raise HTTPException(401, "RUT o contraseña incorrectos")
 
     interrogador = res.data[0]
     if not verify_password(body.password, interrogador["password_hash"]):
-        raise HTTPException(401, "Email o contraseña incorrectos")
+        raise HTTPException(401, "RUT o contraseña incorrectos")
 
     token = crear_token(interrogador)
     return {
@@ -94,20 +95,21 @@ def crear_interrogador(body: CrearInterrogadorIn, admin: dict = Depends(requiere
     if body.rol not in ("admin", "interrogador"):
         raise HTTPException(400, "Rol inválido")
 
-    existe = sb.table("interrogadores").select("id").eq("email", body.email).execute()
+    existe = sb.table("interrogadores").select("id").eq("rut", body.rut).execute()
     if existe.data:
-        raise HTTPException(409, "Ya existe una cuenta con ese email")
+        raise HTTPException(409, "Ya existe una cuenta con ese RUT")
 
     res = sb.table("interrogadores").insert({
-        "email": body.email,
+        "rut": body.rut,
         "password_hash": hash_password(body.password),
         "nombre": body.nombre,
         "rol": body.rol,
     }).execute()
 
     nuevo = res.data[0]
-    return {"id": nuevo["id"], "email": nuevo["email"], "nombre": nuevo["nombre"], "rol": nuevo["rol"]}
+    return {"id": nuevo["id"], "rut": nuevo["rut"], "nombre": nuevo["nombre"], "rol": nuevo["rol"]}
 
 @router.get("/me")
 def me(interrogador: dict = Depends(get_current_interrogador)):
     return interrogador
+  
