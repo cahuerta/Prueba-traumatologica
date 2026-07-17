@@ -72,9 +72,10 @@ async def subir_media(
     sb.storage.from_("preguntas").upload(
         storage_path, contenido, {"content-type": archivo.content_type}
     )
-    url = sb.storage.from_("preguntas").get_public_url(storage_path)
 
-    return {"media_url": url, "media_tipo": tipo}
+    # Bucket privado: no hay URL pública. Se guarda la ruta interna;
+    # la URL firmada (temporal) se genera recién al rendir el examen.
+    return {"media_url": storage_path, "media_tipo": tipo}
 
 
 # ---------------- CRUD DEL BANCO (cualquier interrogador logueado) ----------------
@@ -110,4 +111,3 @@ def listar_preguntas(region: Optional[str] = None, interrogador: dict = Depends(
 def borrar_pregunta(pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
     sb.table("banco_preguntas").update({"activo": False}).eq("id", pregunta_id).execute()
     return {"ok": True}
-    
