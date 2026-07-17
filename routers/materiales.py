@@ -1,22 +1,31 @@
 """
 routers/materiales.py
-PPT y resúmenes que suben los interrogadores, organizados por región,
-para que los alumnos los descarguen después.
-El archivo llega directo al backend (multipart) y el backend lo sube
-a Supabase Storage usando la service_key.
+PPT y resúmenes que suben los interrogadores, organizados por región.
+El alumno entra por un QR fijo (nombre + RUT, validado contra alumnos
+ya existentes), y cada visita/descarga queda registrada para el análisis.
 """
 
 import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
+from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador
 
 router = APIRouter(prefix="/materiales", tags=["materiales"])
 
 
-# ---------------- ENDPOINTS ----------------
+# ---------------- MODELOS ----------------
+class IngresoIn(BaseModel):
+    nombre: str
+    rut: str
+
+class DescargaIn(BaseModel):
+    alumno_id: str
+
+
+# ---------------- SUBIR / LISTAR (interrogador / público) ----------------
 @router.post("")
 async def subir_material(
     region: str = Form(...),
@@ -53,6 +62,54 @@ def listar_materiales(region: Optional[str] = None):
         q = q.eq("region", region)
     rows = q.order("created_at", desc=True).execute().data
     for r in rows:
-        r["url"] = sb.storage.from_("materiales").get_public_url(r["storage_path"])
+        r["url"] = None  # el link real solo se entrega al registrar la descarga
     return rows
+
+
+# ---------------- INGRESO DEL ALUMNO (QR fijo, nombre + RUT) ----------------
+@router.post("/ingreso")
+def ingreso_materiales(body: IngresoIn):
+    """Valida contra alumnos ya existentes (creados al ser habilitados en alguna sesión).
+    Si el RUT no existe en el sistema, no entra."""
+    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).execute().data
+    if not alumno:
+        raise HTTPException(403, "RUT no reconocido en el sistema")
+    alumno_id = alumno[0]["id"]
+
+    sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
+    sb.table("visitas_materiales").insert({"alumno_id": alumno_id}).execute()
+
+    return {"ok": True, "alumno_id": alumno_id}
+
+
+# ---------------- DESCARGA (registra y entrega el link real) ----------------
+@router.post("/{material_id}/descargar")
+def descargar_material(material_id: str, body: DescargaIn):
+    material = sb.table("materiales").select("storage_path").eq("id", material_id).execute().data
+    if not material:
+        raise HTTPException(404, "Material no encontrado")
+
+    sb.table("descargas_materiales").insert({
+        "alumno_id": body.alumno_id, "material_id": material_id
+    }).execute()
+
+    url = sb.storage.from_("materiales").get_public_url(material[0]["storage_path"])
+    return {"url": url}
+
+
+# ---------------- ANÁLISIS (para el admin/interrogador) ----------------
+@router.get("/analisis")
+def analisis_materiales(interrogador: dict = Depends(get_current_interrogador)):
+    por_material = sb.table("analisis_descargas_material").select("*").execute().data
+    por_alumno = sb.table("analisis_actividad_alumno").select("*").order("total_visitas", desc=True).execute().data
+    materiales_info = sb.table("materiales").select("id, region, tipo, titulo").execute().data
+
+    materiales_map = {m["id"]: m for m in materiales_info}
+    for fila in por_material:
+        info = materiales_map.get(fila["material_id"], {})
+        fila["region"] = info.get("region")
+        fila["tipo"] = info.get("tipo")
+        fila["titulo"] = info.get("titulo")
+
+    return {"por_material": por_material, "por_alumno": por_alumno}
     
