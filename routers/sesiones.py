@@ -1,7 +1,8 @@
 """
 routers/sesiones.py
-Ciclo de vida de una sesión de examen ("clase"): listado precargado de
-alumnos habilitados, asistencia en tiempo real, encuesta en vivo, y la
+Ciclo de vida de una sesión de examen ("clase"): alumnos habilitados
+(creados/vinculados desde su RUT), asistencia por nombre+RUT (sin lista
+clicable, se corrobora contra los habilitados), encuesta en vivo, y la
 tabla de resultados con el detalle de cada pregunta respondida.
 """
 
@@ -21,14 +22,15 @@ PAQUETES = ("agil", "estandar", "exigente")
 class SesionIn(BaseModel):
     nombre: str
     fecha: str  # YYYY-MM-DD
-    alumnos_ids: List[str]  # listado de alumnos habilitados para ingresar a esta sesión
+    ruts: List[str]  # RUTs habilitados para esta sesión (se crean/vinculan como alumnos)
 
 class VotoIn(BaseModel):
     alumno_id: str
     paquete: str
 
 class AsistenciaIn(BaseModel):
-    alumno_id: str
+    nombre: str
+    rut: str
 
 
 # ---------------- CREACIÓN Y LISTADO DE SESIONES (admin) ----------------
@@ -38,9 +40,23 @@ def crear_sesion(s: SesionIn, admin: dict = Depends(requiere_admin)):
         "nombre": s.nombre, "fecha": s.fecha, "estado": "creada", "creado_por": admin["sub"]
     }).execute()
     sesion = res.data[0]
-    rows = [{"sesion_id": sesion["id"], "alumno_id": aid} for aid in s.alumnos_ids]
+
+    alumno_ids = []
+    for rut in s.ruts:
+        rut = rut.strip()
+        if not rut:
+            continue
+        existente = sb.table("alumnos").select("id").eq("rut", rut).execute().data
+        if existente:
+            alumno_ids.append(existente[0]["id"])
+        else:
+            nuevo = sb.table("alumnos").insert({"rut": rut, "nombre": ""}).execute().data[0]
+            alumno_ids.append(nuevo["id"])
+
+    rows = [{"sesion_id": sesion["id"], "alumno_id": aid} for aid in alumno_ids]
     if rows:
         sb.table("sesion_alumnos").insert(rows).execute()
+
     return sesion
 
 @router.get("")
@@ -55,26 +71,28 @@ def ver_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrog
     return res
 
 
-# ---------------- ASISTENCIA ----------------
+# ---------------- ASISTENCIA (ingreso por nombre + RUT, sin lista clicable) ----------------
 @router.post("/{sesion_id}/abrir-asistencia")
 def abrir_asistencia(sesion_id: str, admin: dict = Depends(requiere_admin)):
     sb.table("sesiones_examen").update({"estado": "asistencia"}).eq("id", sesion_id).execute()
     return {"ok": True}
 
-@router.get("/{sesion_id}/alumnos")
-def listar_alumnos_sesion(sesion_id: str):
-    """Listado precargado (nombre + RUT) para que el alumno toque su nombre. Público — pantalla de asistencia."""
-    res = sb.table("sesion_alumnos").select("alumno_id, alumnos(id, nombre, rut)").eq("sesion_id", sesion_id).execute()
-    return [r["alumnos"] for r in res.data]
-
 @router.post("/{sesion_id}/asistencia")
 def marcar_asistencia(sesion_id: str, body: AsistenciaIn):
-    """El alumno toca su nombre en la lista. Público, sin login."""
-    valido = sb.table("sesion_alumnos").select("alumno_id").eq("sesion_id", sesion_id).eq("alumno_id", body.alumno_id).execute().data
-    if not valido:
+    """El alumno escribe su nombre y RUT. Se corrobora contra los habilitados de esta sesión."""
+    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).execute().data
+    if not alumno:
+        raise HTTPException(403, "RUT no habilitado para esta sesión")
+    alumno_id = alumno[0]["id"]
+
+    habilitado = sb.table("sesion_alumnos").select("alumno_id").eq("sesion_id", sesion_id).eq("alumno_id", alumno_id).execute().data
+    if not habilitado:
         raise HTTPException(403, "Este alumno no está habilitado para esta sesión")
-    sb.table("asistencia").upsert({"sesion_id": sesion_id, "alumno_id": body.alumno_id}).execute()
-    return {"ok": True}
+
+    sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
+    sb.table("asistencia").upsert({"sesion_id": sesion_id, "alumno_id": alumno_id}).execute()
+
+    return {"ok": True, "alumno_id": alumno_id}
 
 @router.get("/{sesion_id}/asistencia")
 def ver_asistencia(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
@@ -163,3 +181,4 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
+                   
