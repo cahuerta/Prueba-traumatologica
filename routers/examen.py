@@ -99,15 +99,21 @@ def iniciar_examen(body: IniciarExamenIn):
     preguntas.sort(key=lambda q: orden_lista[q["id"]])
 
     orden_opciones = instancia["orden_opciones"] or {}
+    minutos_totales = PAQUETES[instancia["paquete"]]["minutos"]
     for q in preguntas:
         mapeo = orden_opciones.get(q["id"])
         if mapeo:
             q["opciones"] = [q["opciones"][i] for i in mapeo]
+        if q.get("media_url"):
+            firmada = sb.storage.from_("preguntas").create_signed_url(
+                q["media_url"], minutos_totales * 60 + 300
+            )
+            q["media_url"] = firmada.get("signedURL") or firmada.get("signed_url")
 
     return {
         "instancia_id": instancia["id"],
         "paquete": instancia["paquete"],
-        "minutos_totales": PAQUETES[instancia["paquete"]]["minutos"],
+        "minutos_totales": minutos_totales,
         "iniciado_at": instancia["iniciado_at"],
         "preguntas": preguntas,
     }
@@ -161,4 +167,3 @@ def finalizar_examen(instancia_id: str):
     }).eq("id", instancia_id).execute()
 
     return {"puntaje_total": round(puntaje, 2), "porcentaje": round(porcentaje * 100, 1), "nota": round(nota, 1)}
-    
