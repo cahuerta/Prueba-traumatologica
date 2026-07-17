@@ -102,10 +102,24 @@ def crear_preguntas_bulk(preguntas: List[PreguntaIn], interrogador: dict = Depen
 
 @router.get("")
 def listar_preguntas(region: Optional[str] = None, interrogador: dict = Depends(get_current_interrogador)):
-    q = sb.table("banco_preguntas").select("*").eq("activo", True)
+    q = sb.table("banco_preguntas").select("*, interrogadores(nombre)").eq("activo", True)
     if region:
         q = q.eq("region", region)
-    return q.execute().data
+    rows = q.execute().data
+    for r in rows:
+        r["creado_por_nombre"] = (r.get("interrogadores") or {}).get("nombre")
+    return rows
+
+@router.get("/{pregunta_id}/media")
+def obtener_media(pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """URL firmada temporal para previsualizar la foto/video de una pregunta (bucket privado)."""
+    p = sb.table("banco_preguntas").select("media_url").eq("id", pregunta_id).single().execute().data
+    if not p or not p["media_url"]:
+        raise HTTPException(404, "Esta pregunta no tiene foto/video")
+
+    firmada = sb.storage.from_("preguntas").create_signed_url(p["media_url"], 300)
+    url = firmada.get("signedURL") or firmada.get("signed_url")
+    return {"url": url}
 
 @router.delete("/{pregunta_id}")
 def borrar_pregunta(pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
