@@ -4,12 +4,15 @@ Banco de preguntas: opción múltiple simple, 5 alternativas (A-E), una sola cor
 El interrogador ingresa la pregunta + la respuesta correcta; las otras 4
 alternativas las propone la IA vía /preguntas/generar-alternativas, y el
 interrogador las revisa/edita antes de guardar con POST /preguntas.
+Opcionalmente puede llevar una foto o video (ej. radiografías), subido
+al bucket "preguntas" (separado de "materiales").
 """
 
 import random
+import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File
 from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador
@@ -32,6 +35,8 @@ class PreguntaIn(BaseModel):
     opciones: List[str]  # exactamente 5 (A-E)
     correcta: int         # índice 0-4
     explicacion: Optional[str] = None
+    media_url: Optional[str] = None
+    media_tipo: Optional[str] = None  # "foto" | "video"
 
 
 # ---------------- GENERAR ALTERNATIVAS CON IA (no guarda nada) ----------------
@@ -49,6 +54,27 @@ def generar_alternativas_endpoint(body: GenerarAlternativasIn, interrogador: dic
     correcta_idx = opciones.index(body.respuesta_correcta)
 
     return {"opciones": opciones, "correcta": correcta_idx}
+
+
+# ---------------- SUBIR FOTO/VIDEO DE LA PREGUNTA (bucket "preguntas") ----------------
+@router.post("/media")
+async def subir_media(
+    tipo: str = Form(...),  # "foto" | "video"
+    archivo: UploadFile = File(...),
+    interrogador: dict = Depends(get_current_interrogador),
+):
+    if tipo not in ("foto", "video"):
+        raise HTTPException(400, "Tipo inválido, debe ser 'foto' o 'video'")
+
+    contenido = await archivo.read()
+    storage_path = f"{int(time.time())}-{archivo.filename}"
+
+    sb.storage.from_("preguntas").upload(
+        storage_path, contenido, {"content-type": archivo.content_type}
+    )
+    url = sb.storage.from_("preguntas").get_public_url(storage_path)
+
+    return {"media_url": url, "media_tipo": tipo}
 
 
 # ---------------- CRUD DEL BANCO (cualquier interrogador logueado) ----------------
@@ -84,4 +110,4 @@ def listar_preguntas(region: Optional[str] = None, interrogador: dict = Depends(
 def borrar_pregunta(pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
     sb.table("banco_preguntas").update({"activo": False}).eq("id", pregunta_id).execute()
     return {"ok": True}
-  
+    
