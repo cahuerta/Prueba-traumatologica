@@ -1,15 +1,16 @@
 -- ============================================================
--- EXAMEN MUSCULOESQUELÉTICO — Supabase nuevo, proyecto aparte de ICA
+-- EXAMEN MUSCULOESQUELÉTICO — schema.sql (fuente de verdad)
+-- Supabase nuevo, proyecto aparte de ICA
 -- ============================================================
 
 create extension if not exists "pgcrypto";
 
--- ---------- INTERROGADORES (auth propio, con rol) ----------
+-- ---------- INTERROGADORES (auth propio, login por RUT, con rol) ----------
 create type rol_enum as enum ('admin', 'interrogador');
 
 create table if not exists interrogadores (
   id uuid primary key default gen_random_uuid(),
-  email text unique not null,
+  rut text unique not null,
   password_hash text not null,
   nombre text not null,
   rol rol_enum not null default 'interrogador',
@@ -57,6 +58,24 @@ create table if not exists materiales (
 );
 
 create index if not exists idx_materiales_region on materiales(region);
+
+-- ---------- TRACKING DE MATERIALES (visitas + descargas por alumno) ----------
+create table if not exists visitas_materiales (
+  id uuid primary key default gen_random_uuid(),
+  alumno_id uuid references alumnos(id) not null,
+  visitado_at timestamptz default now()
+);
+
+create table if not exists descargas_materiales (
+  id uuid primary key default gen_random_uuid(),
+  alumno_id uuid references alumnos(id) not null,
+  material_id uuid references materiales(id) not null,
+  descargado_at timestamptz default now()
+);
+
+create index if not exists idx_visitas_alumno on visitas_materiales(alumno_id);
+create index if not exists idx_descargas_material on descargas_materiales(material_id);
+create index if not exists idx_descargas_alumno on descargas_materiales(alumno_id);
 
 -- ---------- SESIONES DE EXAMEN ----------
 create type sesion_estado as enum ('creada', 'asistencia', 'encuesta', 'en_curso', 'finalizada');
@@ -154,3 +173,21 @@ from respuestas r
 join examen_instancia ei on ei.id = r.examen_instancia_id
 join banco_preguntas bp on bp.id = r.pregunta_id
 group by ei.sesion_id, bp.complejidad;
+
+-- ---------- VISTAS DE ANÁLISIS DE MATERIALES ----------
+create or replace view analisis_descargas_material as
+select
+  material_id,
+  count(*) as total_descargas,
+  count(distinct alumno_id) as alumnos_distintos
+from descargas_materiales
+group by material_id;
+
+create or replace view analisis_actividad_alumno as
+select
+  a.id as alumno_id,
+  a.nombre,
+  a.rut,
+  (select count(*) from visitas_materiales v where v.alumno_id = a.id) as total_visitas,
+  (select count(*) from descargas_materiales d where d.alumno_id = a.id) as total_descargas
+from alumnos a;
