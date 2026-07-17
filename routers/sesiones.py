@@ -153,7 +153,7 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
     la alternativa correcta y la explicación).
     """
     instancias = sb.table("examen_instancia").select(
-        "id, alumno_id, paquete, puntaje_total, porcentaje, nota, iniciado_at, finalizado_at, alumnos(nombre, rut)"
+        "id, alumno_id, paquete, puntaje_total, porcentaje, nota, iniciado_at, finalizado_at, salidas_detectadas, alumnos(nombre, rut)"
     ).eq("sesion_id", sesion_id).execute().data
 
     resultados = []
@@ -183,6 +183,7 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
             "porcentaje": inst["porcentaje"],
             "nota": inst["nota"],
             "finalizado": inst["finalizado_at"] is not None,
+            "salidas_detectadas": inst["salidas_detectadas"],
             "n_preguntas_respondidas": len(detalle),
             "n_correctas": sum(1 for d in detalle if d["correcta"]),
             "n_incorrectas": sum(1 for d in detalle if not d["correcta"]),
@@ -190,4 +191,3 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
-    
