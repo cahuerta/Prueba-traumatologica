@@ -1,13 +1,37 @@
 -- ============================================================
 -- EXAMEN MUSCULOESQUELÉTICO — schema.sql (fuente de verdad)
 -- Supabase nuevo, proyecto aparte de ICA
+-- Idempotente: seguro de correr en cada arranque (db_init.py)
 -- ============================================================
 
 create extension if not exists "pgcrypto";
 
--- ---------- INTERROGADORES (auth propio, login por RUT, con rol) ----------
-create type rol_enum as enum ('admin', 'interrogador');
+-- ---------- TIPOS ENUM (creación idempotente vía DO block) ----------
+DO $$ BEGIN
+  CREATE TYPE rol_enum AS ENUM ('admin', 'interrogador');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN
+  CREATE TYPE complejidad_enum AS ENUM ('basica', 'intermedia', 'compleja');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE material_tipo AS ENUM ('ppt', 'resumen');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE sesion_estado AS ENUM ('creada', 'asistencia', 'encuesta', 'en_curso', 'finalizada');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE paquete_enum AS ENUM ('agil', 'estandar', 'exigente');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE media_tipo_enum AS ENUM ('foto', 'video');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ---------- INTERROGADORES (auth propio, login por RUT, con rol) ----------
 create table if not exists interrogadores (
   id uuid primary key default gen_random_uuid(),
   rut text unique not null,
@@ -27,8 +51,6 @@ create table if not exists alumnos (
 );
 
 -- ---------- BANCO DE PREGUNTAS ----------
-create type complejidad_enum as enum ('basica', 'intermedia', 'compleja');
-
 create table if not exists banco_preguntas (
   id uuid primary key default gen_random_uuid(),
   region text not null,
@@ -42,11 +64,13 @@ create table if not exists banco_preguntas (
   created_at timestamptz default now()
 );
 
+-- Foto o video opcional en la pregunta (ej. radiografías), separado de "materiales"
+alter table banco_preguntas add column if not exists media_url text;
+alter table banco_preguntas add column if not exists media_tipo media_tipo_enum;
+
 create index if not exists idx_preguntas_region_complejidad on banco_preguntas(region, complejidad) where activo;
 
 -- ---------- MATERIALES (PPT / resumen, por región) ----------
-create type material_tipo as enum ('ppt', 'resumen');
-
 create table if not exists materiales (
   id uuid primary key default gen_random_uuid(),
   region text not null,
@@ -78,9 +102,6 @@ create index if not exists idx_descargas_material on descargas_materiales(materi
 create index if not exists idx_descargas_alumno on descargas_materiales(alumno_id);
 
 -- ---------- SESIONES DE EXAMEN ----------
-create type sesion_estado as enum ('creada', 'asistencia', 'encuesta', 'en_curso', 'finalizada');
-create type paquete_enum as enum ('agil', 'estandar', 'exigente');
-
 create table if not exists sesiones_examen (
   id uuid primary key default gen_random_uuid(),
   nombre text not null,
