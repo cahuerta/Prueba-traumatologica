@@ -1,13 +1,13 @@
 """
 Backend — Examen Musculoesquelético
-main.py — solo organiza la app y monta los routers de cada módulo.
-La lógica de cada grupo de endpoints vive en su propio archivo.
+main.py — organiza la app, monta los routers, y aplica schema.sql al arrancar.
 """
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import auth, preguntas, materiales, sesiones, examen, analisis
+from db_init import inicializar_schema
 
 app = FastAPI(title="Examen Musculoesquelético API")
 
@@ -24,3 +24,9 @@ app.include_router(materiales.router)
 app.include_router(sesiones.router)
 app.include_router(examen.router)
 app.include_router(analisis.router)
+
+
+@app.on_event("startup")
+def startup():
+    inicializar_schema()
+    
