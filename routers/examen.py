@@ -1,7 +1,8 @@
 """
 routers/examen.py
 Rendición del examen: genera las preguntas al azar por cuota de
-complejidad según el paquete elegido en la encuesta, recibe las
+complejidad según el paquete elegido en la encuesta, mezcla el orden
+de las alternativas por alumno (evita copia por letra), recibe las
 respuestas (el timer arranca con la primera), y calcula el puntaje
 y la nota final al cerrar.
 """
@@ -32,7 +33,7 @@ class IniciarExamenIn(BaseModel):
 
 class ResponderIn(BaseModel):
     pregunta_id: str
-    opcion_elegida: int
+    opcion_elegida: int  # posición mostrada al alumno (ya mezclada), no el índice original
 
 
 # ---------------- HELPERS ----------------
@@ -57,6 +58,15 @@ def _calcular_puntos(seleccion: dict):
             puntos[qid] = valor
     return puntos
 
+def _generar_orden_opciones(pregunta_ids: list, n_opciones: int = 5):
+    """Por cada pregunta, un orden mezclado distinto. orden[pregunta_id][pos_mostrada] = índice_original."""
+    orden = {}
+    for qid in pregunta_ids:
+        indices = list(range(n_opciones))
+        random.shuffle(indices)
+        orden[qid] = indices
+    return orden
+
 
 # ---------------- ENDPOINTS (públicos, los usa el alumno) ----------------
 @router.post("/iniciar")
@@ -74,15 +84,25 @@ def iniciar_examen(body: IniciarExamenIn):
         puntos = _calcular_puntos(seleccion)
         pregunta_ids = [qid for ids in seleccion.values() for qid in ids]
         random.shuffle(pregunta_ids)
+        orden_opciones = _generar_orden_opciones(pregunta_ids)
         res = sb.table("examen_instancia").insert({
             "sesion_id": body.sesion_id, "alumno_id": body.alumno_id, "paquete": paquete,
-            "pregunta_ids": pregunta_ids, "puntos_por_pregunta": puntos,
+            "pregunta_ids": pregunta_ids, "puntos_por_pregunta": puntos, "orden_opciones": orden_opciones,
         }).execute()
         instancia = res.data[0]
 
-    preguntas = sb.table("banco_preguntas").select("id, region, pregunta, opciones").in_("id", instancia["pregunta_ids"]).execute().data
-    orden = {qid: i for i, qid in enumerate(instancia["pregunta_ids"])}
-    preguntas.sort(key=lambda q: orden[q["id"]])
+    preguntas = sb.table("banco_preguntas").select(
+        "id, region, pregunta, opciones, media_url, media_tipo"
+    ).in_("id", instancia["pregunta_ids"]).execute().data
+
+    orden_lista = {qid: i for i, qid in enumerate(instancia["pregunta_ids"])}
+    preguntas.sort(key=lambda q: orden_lista[q["id"]])
+
+    orden_opciones = instancia["orden_opciones"] or {}
+    for q in preguntas:
+        mapeo = orden_opciones.get(q["id"])
+        if mapeo:
+            q["opciones"] = [q["opciones"][i] for i in mapeo]
 
     return {
         "instancia_id": instancia["id"],
@@ -104,11 +124,16 @@ def responder(instancia_id: str, body: ResponderIn):
         sb.table("examen_instancia").update({"iniciado_at": datetime.now(timezone.utc).isoformat()}).eq("id", instancia_id).execute()
 
     pregunta = sb.table("banco_preguntas").select("correcta").eq("id", body.pregunta_id).single().execute().data
-    correcta = pregunta["correcta"] == body.opcion_elegida
+
+    # La opción elegida viene en la posición MOSTRADA (mezclada); se traduce al índice original.
+    mapeo = (instancia["orden_opciones"] or {}).get(body.pregunta_id)
+    opcion_original = mapeo[body.opcion_elegida] if mapeo else body.opcion_elegida
+
+    correcta = pregunta["correcta"] == opcion_original
 
     sb.table("respuestas").upsert({
         "examen_instancia_id": instancia_id, "pregunta_id": body.pregunta_id,
-        "opcion_elegida": body.opcion_elegida, "correcta": correcta,
+        "opcion_elegida": opcion_original, "correcta": correcta,
     }).execute()
     return {"correcta": correcta}
 
@@ -136,4 +161,4 @@ def finalizar_examen(instancia_id: str):
     }).eq("id", instancia_id).execute()
 
     return {"puntaje_total": round(puntaje, 2), "porcentaje": round(porcentaje * 100, 1), "nota": round(nota, 1)}
-      
+    
