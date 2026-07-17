@@ -1,9 +1,10 @@
 """
 routers/sesiones.py
 Ciclo de vida de una sesión de examen ("clase"): alumnos habilitados
-(creados/vinculados desde su RUT), asistencia por nombre+RUT (sin lista
-clicable, se corrobora contra los habilitados), encuesta en vivo, y la
-tabla de resultados con el detalle de cada pregunta respondida.
+(creados/vinculados desde nombre+RUT, pegados desde Excel), asistencia
+por nombre+RUT (sin lista clicable, se corrobora contra los habilitados),
+encuesta en vivo, y la tabla de resultados con el detalle de cada
+pregunta respondida.
 """
 
 from typing import List
@@ -19,10 +20,14 @@ PAQUETES = ("agil", "estandar", "exigente")
 
 
 # ---------------- MODELOS ----------------
+class AlumnoIn(BaseModel):
+    nombre: str
+    rut: str
+
 class SesionIn(BaseModel):
     nombre: str
     fecha: str  # YYYY-MM-DD
-    ruts: List[str]  # RUTs habilitados para esta sesión (se crean/vinculan como alumnos)
+    alumnos: List[AlumnoIn]  # pegados desde Excel: nombre + RUT por fila
 
 class VotoIn(BaseModel):
     alumno_id: str
@@ -42,16 +47,20 @@ def crear_sesion(s: SesionIn, admin: dict = Depends(requiere_admin)):
     sesion = res.data[0]
 
     alumno_ids = []
-    for rut in s.ruts:
-        rut = rut.strip()
+    for a in s.alumnos:
+        rut = a.rut.strip()
+        nombre = a.nombre.strip()
         if not rut:
             continue
         existente = sb.table("alumnos").select("id").eq("rut", rut).execute().data
         if existente:
-            alumno_ids.append(existente[0]["id"])
+            alumno_id = existente[0]["id"]
+            if nombre:
+                sb.table("alumnos").update({"nombre": nombre}).eq("id", alumno_id).execute()
         else:
-            nuevo = sb.table("alumnos").insert({"rut": rut, "nombre": ""}).execute().data[0]
-            alumno_ids.append(nuevo["id"])
+            nuevo = sb.table("alumnos").insert({"rut": rut, "nombre": nombre}).execute().data[0]
+            alumno_id = nuevo["id"]
+        alumno_ids.append(alumno_id)
 
     rows = [{"sesion_id": sesion["id"], "alumno_id": aid} for aid in alumno_ids]
     if rows:
@@ -181,4 +190,4 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
-                   
+    
