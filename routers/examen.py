@@ -167,3 +167,25 @@ def finalizar_examen(instancia_id: str):
     }).eq("id", instancia_id).execute()
 
     return {"puntaje_total": round(puntaje, 2), "porcentaje": round(porcentaje * 100, 1), "nota": round(nota, 1)}
+
+
+# ---------------- DETECCIÓN DE SALIDA (cambio de app/pestaña durante el examen) ----------------
+MAX_SALIDAS = 3
+
+@router.post("/{instancia_id}/registrar-salida")
+def registrar_salida(instancia_id: str):
+    instancia = sb.table("examen_instancia").select("*").eq("id", instancia_id).single().execute().data
+    if not instancia:
+        raise HTTPException(404, "Examen no encontrado")
+    if instancia["finalizado_at"]:
+        raise HTTPException(409, "El examen ya fue finalizado")
+
+    sb.table("intentos_salida").insert({"examen_instancia_id": instancia_id}).execute()
+    nuevo_conteo = instancia["salidas_detectadas"] + 1
+    sb.table("examen_instancia").update({"salidas_detectadas": nuevo_conteo}).eq("id", instancia_id).execute()
+
+    if nuevo_conteo >= MAX_SALIDAS:
+        resultado = finalizar_examen(instancia_id)
+        return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
+
+    return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
