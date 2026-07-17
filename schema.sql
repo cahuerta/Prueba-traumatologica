@@ -151,6 +151,15 @@ create table if not exists examen_instancia (
 
 -- Orden mezclado de alternativas por alumno: {"<pregunta_id>": [índices originales en el orden mostrado]}
 alter table examen_instancia add column if not exists orden_opciones jsonb;
+alter table examen_instancia add column if not exists salidas_detectadas int default 0;
+
+create table if not exists intentos_salida (
+  id uuid primary key default gen_random_uuid(),
+  examen_instancia_id uuid references examen_instancia(id) not null,
+  detectado_at timestamptz default now()
+);
+
+create index if not exists idx_intentos_salida_instancia on intentos_salida(examen_instancia_id);
 
 create table if not exists respuestas (
   id uuid primary key default gen_random_uuid(),
