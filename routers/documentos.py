@@ -1,15 +1,17 @@
 """
 routers/documentos.py
-Genera documentos de revisión clínica llamando al backend de EvidenciaMed
-(POST /generate/document), a partir de los papers que el interrogador
-seleccionó y ya tiene analizados en EvidenciaMed.
+Dos funciones, ambas server-to-server hacia EvidenciaMed (el navegador del
+interrogador nunca ve ninguna clave de EvidenciaMed):
 
-La comunicación con EvidenciaMed es server-to-server: el frontend nunca ve
-la DOCUMENT_KEY, solo necesita el token de sesión normal del interrogador.
+1. POST /documentos/buscar   → proxy hacia /search de EvidenciaMed
+2. POST /documentos/generar  → proxy hacia /generate/document de EvidenciaMed
 
-Variables de entorno esperadas (Render):
-  EVIDENCIAMED_URL    (ej: https://evidenciamed-api.onrender.com)
-  DOCUMENT_KEY        (debe coincidir con la DOCUMENT_KEY configurada en EvidenciaMed)
+Variables de entorno esperadas (Render, backend Músculo):
+  EVIDENCIAMED_URL       (ej: https://evidenciamed-api.onrender.com)
+  EVIDENCIAMED_API_KEY   (la misma que usa el propio frontend de EvidenciaMed,
+                          protege /search y /analyze/*)
+  DOCUMENT_KEY           (clave exclusiva de /generate/document, distinta de
+                          la anterior)
 """
 
 import os
@@ -21,9 +23,15 @@ from pydantic import BaseModel
 from routers.auth import sb, get_current_interrogador
 
 EVIDENCIAMED_URL = os.environ["EVIDENCIAMED_URL"]
+EVIDENCIAMED_API_KEY = os.environ["EVIDENCIAMED_API_KEY"]
 DOCUMENT_KEY = os.environ["DOCUMENT_KEY"]
 
 router = APIRouter(prefix="/documentos", tags=["documentos"])
+
+
+class BuscarIn(BaseModel):
+    tema: str
+    max_results: int = 20
 
 
 class GenerarDocumentoIn(BaseModel):
@@ -37,6 +45,32 @@ def _obtener_nombre_interrogador(interrogador_id: str) -> str:
     if not res.data:
         return "No especificado"
     return res.data[0]["nombre"]
+
+
+@router.post("/buscar")
+async def buscar_papers(
+    body: BuscarIn,
+    interrogador: dict = Depends(get_current_interrogador),
+):
+    """Cualquier interrogador autenticado puede buscar. Proxy server-to-server
+    hacia /search de EvidenciaMed — el navegador nunca ve EVIDENCIAMED_API_KEY."""
+    if len(body.tema.strip()) < 3:
+        raise HTTPException(422, "Tema demasiado corto.")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{EVIDENCIAMED_URL}/search",
+                headers={"X-API-Key": EVIDENCIAMED_API_KEY},
+                json={"query": body.tema.strip(), "max_results": min(body.max_results, 20)},
+            )
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"No se pudo contactar a EvidenciaMed: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, f"EvidenciaMed respondió con error: {r.text}")
+
+    return r.json()
 
 
 @router.post("/generar")
