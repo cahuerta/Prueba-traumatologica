@@ -88,7 +88,7 @@ async def generar_documento(
     autor = _obtener_nombre_interrogador(interrogador["sub"])
 
     try:
-        async with httpx.AsyncClient(timeout=90) as c:
+        async with httpx.AsyncClient(timeout=300) as c:
             r = await c.post(
                 f"{EVIDENCIAMED_URL}/generate/document",
                 headers={"X-Document-Key": DOCUMENT_KEY},
