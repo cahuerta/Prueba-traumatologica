@@ -30,6 +30,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
 
 from routers.auth import sb, get_current_interrogador
 
@@ -143,6 +147,87 @@ def _construir_pdf(doc: DocumentoEditadoIn) -> bytes:
     return buffer.read()
 
 
+NAVY_RGB = RGBColor(0x1F, 0x4E, 0x78)
+GRAY_RGB = RGBColor(0x59, 0x59, 0x59)
+
+SECCIONES_PPT = [
+    ("introduccion", "Introducción"),
+    ("clinica", "Clínica"),
+    ("diagnostico", "Diagnóstico"),
+    ("diagnostico_diferencial", "Diagnóstico diferencial"),
+    ("examenes_complementarios", "Exámenes complementarios"),
+    ("tratamientos", "Tratamientos"),
+    ("resultados", "Resultados"),
+    ("conclusiones", "Conclusiones"),
+]
+
+
+def _agregar_slide_titulo(prs: Presentation, doc: "DocumentoEditadoIn"):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # layout en blanco
+    box = slide.shapes.add_textbox(Inches(0.7), Inches(2.7), Inches(8.6), Inches(1.8))
+    tf = box.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.text = doc.titulo
+    p.font.size = Pt(32)
+    p.font.bold = True
+    p.font.color.rgb = NAVY_RGB
+    p.alignment = PP_ALIGN.CENTER
+
+    p2 = tf.add_paragraph()
+    p2.text = f"Autor: {doc.autor}"
+    p2.font.size = Pt(16)
+    p2.font.italic = True
+    p2.font.color.rgb = GRAY_RGB
+    p2.alignment = PP_ALIGN.CENTER
+
+
+def _agregar_slide_texto(prs: Presentation, titulo: str, texto: str):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.35), Inches(9), Inches(0.7))
+    tf_title = title_box.text_frame
+    p_title = tf_title.paragraphs[0]
+    p_title.text = titulo
+    p_title.font.size = Pt(26)
+    p_title.font.bold = True
+    p_title.font.color.rgb = NAVY_RGB
+
+    body_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(9), Inches(5.8))
+    tf_body = body_box.text_frame
+    tf_body.word_wrap = True
+
+    parrafos = [p for p in (texto or "—").split("\n") if p.strip()] or ["—"]
+    for i, parrafo in enumerate(parrafos):
+        p = tf_body.paragraphs[0] if i == 0 else tf_body.add_paragraph()
+        p.text = parrafo
+        p.font.size = Pt(16)
+        p.space_after = Pt(10)
+
+
+def _construir_ppt(doc: "DocumentoEditadoIn") -> bytes:
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+
+    _agregar_slide_titulo(prs, doc)
+
+    epi = doc.epidemiologia or EpidemiologiaIn()
+    epi_texto = f"Internacional:\n{epi.internacional or '—'}\n\nNacional:\n{epi.nacional or '—'}"
+    _agregar_slide_texto(prs, "Epidemiología internacional y nacional", epi_texto)
+
+    for key, label in SECCIONES_PPT:
+        _agregar_slide_texto(prs, label, getattr(doc, key))
+
+    if doc.referencias:
+        _agregar_slide_texto(prs, "Referencias", "\n".join(doc.referencias))
+
+    buffer = BytesIO()
+    prs.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
 @router.get("/ping")
 async def ping_evidenciamed():
     """Dispara una petición liviana a EvidenciaMed para despertar el servicio
@@ -229,4 +314,23 @@ async def documento_a_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{nombre}.pdf"'},
     )
+
+
+@router.post("/ppt")
+async def documento_a_ppt(
+    body: DocumentoEditadoIn,
+    interrogador: dict = Depends(get_current_interrogador),
+):
+    """Recibe el texto YA EDITADO por el interrogador y devuelve un
+    PowerPoint EDITABLE (texto real en cada slide, no una imagen), pensado
+    como base de trabajo para que el interrogador agregue fotos, borre o
+    corrija directamente en PowerPoint. Independiente del PDF — se genera
+    del mismo texto editado, no a partir del PDF."""
+    ppt_bytes = _construir_ppt(body)
+    nombre = "".join(c for c in body.titulo if c.isalnum() or c in " -_")[:60].strip() or "documento"
+    return Response(
+        content=ppt_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{nombre}.pptx"'},
+  )
   
