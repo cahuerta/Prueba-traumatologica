@@ -18,10 +18,13 @@ Variables de entorno esperadas (Render, backend Músculo):
 """
 
 import os
+import json
+import asyncio
 from io import BytesIO
 from typing import Optional
 
 import httpx
+import anthropic
 from fastapi import APIRouter, HTTPException, Depends, Response
 from pydantic import BaseModel
 from reportlab.lib.pagesizes import letter
@@ -36,6 +39,9 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 
 from routers.auth import sb, get_current_interrogador
+
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 EVIDENCIAMED_URL = os.environ["EVIDENCIAMED_URL"]
 EVIDENCIAMED_API_KEY = os.environ["EVIDENCIAMED_API_KEY"]
@@ -162,6 +168,48 @@ SECCIONES_PPT = [
 ]
 
 
+async def _resumir_seccion(titulo: str, texto: str) -> list[list[str]]:
+    """Condensa el texto de una sección en bullets aplicando la regla 6x6
+    (máx. 6 bullets por diapositiva, máx. 6 palabras por bullet). Si el
+    contenido no cabe en 6 bullets, devuelve varias diapositivas."""
+    texto = (texto or "").strip()
+    if not texto or texto == "—":
+        return [["Sin información disponible"]]
+
+    prompt = f"""Resume el siguiente texto médico en bullets para una diapositiva de clase de docencia, para mantener la atención de los alumnos.
+
+REGLAS ESTRICTAS (regla 6x6):
+- Máximo 6 bullets por diapositiva.
+- Cada bullet debe tener máximo 6 palabras — palabras clave, no oraciones completas.
+- Si el contenido no cabe en 6 bullets, divide en varias diapositivas, cada una con máximo 6 bullets de máximo 6 palabras.
+- No inventes información que no esté en el texto entregado.
+
+Sección: {titulo}
+Texto:
+{texto}
+
+Devuelve EXCLUSIVAMENTE un JSON válido, sin texto adicional ni markdown:
+{{"slides": [{{"bullets": ["...", "..."]}}, {{"bullets": ["...", "..."]}}]}}"""
+
+    try:
+        message = client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean)
+        slides = [s.get("bullets", [])[:6] for s in data.get("slides", [])]
+        return slides or [["Sin información disponible"]]
+    except Exception:
+        # Fallback si Claude falla o el JSON viene mal: corta en bloques
+        # crudos de 6 palabras para no dejar la slide vacía.
+        palabras = texto.split()
+        bloques = [" ".join(palabras[i:i + 6]) for i in range(0, min(len(palabras), 36), 6)]
+        return [bloques] if bloques else [["Sin información disponible"]]
+
+
 def _agregar_slide_titulo(prs: Presentation, doc: "DocumentoEditadoIn"):
     slide = prs.slides.add_slide(prs.slide_layouts[6])  # layout en blanco
     box = slide.shapes.add_textbox(Inches(0.7), Inches(2.7), Inches(8.6), Inches(1.8))
@@ -182,30 +230,32 @@ def _agregar_slide_titulo(prs: Presentation, doc: "DocumentoEditadoIn"):
     p2.alignment = PP_ALIGN.CENTER
 
 
-def _agregar_slide_texto(prs: Presentation, titulo: str, texto: str):
+def _agregar_slide_bullets(prs: Presentation, titulo: str, bullets: list[str], continuacion: bool = False):
+    """Una slide con hasta 6 bullets, fuente 24pt+, regla 6x6."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
 
+    titulo_mostrado = f"{titulo} (cont.)" if continuacion else titulo
     title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.35), Inches(9), Inches(0.7))
     tf_title = title_box.text_frame
     p_title = tf_title.paragraphs[0]
-    p_title.text = titulo
-    p_title.font.size = Pt(26)
+    p_title.text = titulo_mostrado
+    p_title.font.size = Pt(28)
     p_title.font.bold = True
     p_title.font.color.rgb = NAVY_RGB
 
-    body_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(9), Inches(5.8))
+    body_box = slide.shapes.add_textbox(Inches(0.7), Inches(1.4), Inches(8.6), Inches(5.6))
     tf_body = body_box.text_frame
     tf_body.word_wrap = True
 
-    parrafos = [p for p in (texto or "—").split("\n") if p.strip()] or ["—"]
-    for i, parrafo in enumerate(parrafos):
+    bullets = bullets[:6] or ["Sin información disponible"]
+    for i, bullet in enumerate(bullets):
         p = tf_body.paragraphs[0] if i == 0 else tf_body.add_paragraph()
-        p.text = parrafo
-        p.font.size = Pt(16)
-        p.space_after = Pt(10)
+        p.text = f"•  {bullet}"
+        p.font.size = Pt(24)
+        p.space_after = Pt(18)
 
 
-def _construir_ppt(doc: "DocumentoEditadoIn") -> bytes:
+async def _construir_ppt(doc: "DocumentoEditadoIn") -> bytes:
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(7.5)
@@ -213,14 +263,19 @@ def _construir_ppt(doc: "DocumentoEditadoIn") -> bytes:
     _agregar_slide_titulo(prs, doc)
 
     epi = doc.epidemiologia or EpidemiologiaIn()
-    epi_texto = f"Internacional:\n{epi.internacional or '—'}\n\nNacional:\n{epi.nacional or '—'}"
-    _agregar_slide_texto(prs, "Epidemiología internacional y nacional", epi_texto)
+    epi_texto = f"Internacional: {epi.internacional or '—'}\nNacional: {epi.nacional or '—'}"
 
-    for key, label in SECCIONES_PPT:
-        _agregar_slide_texto(prs, label, getattr(doc, key))
-
+    secciones_a_resumir = [("Epidemiología internacional y nacional", epi_texto)]
+    secciones_a_resumir += [(label, getattr(doc, key)) for key, label in SECCIONES_PPT]
     if doc.referencias:
-        _agregar_slide_texto(prs, "Referencias", "\n".join(doc.referencias))
+        secciones_a_resumir.append(("Referencias", "\n".join(doc.referencias)))
+
+    # Resume TODAS las secciones en paralelo (no secuencial)
+    resultados = await asyncio.gather(*(_resumir_seccion(titulo, texto) for titulo, texto in secciones_a_resumir))
+
+    for (titulo, _texto), slides_bullets in zip(secciones_a_resumir, resultados):
+        for i, bullets in enumerate(slides_bullets):
+            _agregar_slide_bullets(prs, titulo, bullets, continuacion=(i > 0))
 
     buffer = BytesIO()
     prs.save(buffer)
@@ -322,15 +377,15 @@ async def documento_a_ppt(
     interrogador: dict = Depends(get_current_interrogador),
 ):
     """Recibe el texto YA EDITADO por el interrogador y devuelve un
-    PowerPoint EDITABLE (texto real en cada slide, no una imagen), pensado
-    como base de trabajo para que el interrogador agregue fotos, borre o
-    corrija directamente en PowerPoint. Independiente del PDF — se genera
-    del mismo texto editado, no a partir del PDF."""
-    ppt_bytes = _construir_ppt(body)
+    PowerPoint EDITABLE pensado para docencia: cada sección se RESUME con
+    Claude aplicando la regla 6x6 (máx. 6 bullets por slide, máx. 6 palabras
+    por bullet), dividiendo en varias diapositivas si no cabe. No es una
+    copia del texto — es un resumen del resumen, para mantener la atención
+    de los alumnos. Independiente del PDF."""
+    ppt_bytes = await _construir_ppt(body)
     nombre = "".join(c for c in body.titulo if c.isalnum() or c in " -_")[:60].strip() or "documento"
     return Response(
         content=ppt_bytes,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         headers={"Content-Disposition": f'attachment; filename="{nombre}.pptx"'},
   )
-  
