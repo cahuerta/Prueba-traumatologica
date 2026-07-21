@@ -251,6 +251,11 @@ def iniciar_sesion(body: IniciarSesionIn, interrogador: dict = Depends(get_curre
     }).execute()
     return res.data[0]
 
+@router.get("/vivo/{sesion_id}")
+def obtener_sesion_profesor(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Devuelve la sesion completa (incluyendo codigo_acceso) para el panel del profesor."""
+    return obtener_sesion(sesion_id)
+
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral."""
@@ -313,4 +318,4 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
         raise HTTPException(400, "Accion invalida")
 
     return obtener_sesion(sesion_id)
-  
+                                                        
