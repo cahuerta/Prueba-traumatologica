@@ -31,6 +31,10 @@ DO $$ BEGIN
   CREATE TYPE media_tipo_enum AS ENUM ('foto', 'video');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN
+  CREATE TYPE sesion_vivo_estado AS ENUM ('esperando', 'votando', 'discusion', 'cerrada');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ---------- INTERROGADORES (auth propio, login por RUT, con rol) ----------
 create table if not exists interrogadores (
   id uuid primary key default gen_random_uuid(),
@@ -64,7 +68,6 @@ create table if not exists banco_preguntas (
   created_at timestamptz default now()
 );
 
--- Foto o video opcional en la pregunta (ej. radiografías), separado de "materiales"
 alter table banco_preguntas add column if not exists media_url text;
 alter table banco_preguntas add column if not exists media_tipo media_tipo_enum;
 
@@ -149,7 +152,6 @@ create table if not exists examen_instancia (
   unique (sesion_id, alumno_id)
 );
 
--- Orden mezclado de alternativas por alumno: {"<pregunta_id>": [índices originales en el orden mostrado]}
 alter table examen_instancia add column if not exists orden_opciones jsonb;
 alter table examen_instancia add column if not exists salidas_detectadas int default 0;
 
@@ -173,6 +175,84 @@ create table if not exists respuestas (
 
 create index if not exists idx_respuestas_instancia on respuestas(examen_instancia_id);
 create index if not exists idx_instancia_sesion on examen_instancia(sesion_id);
+
+-- ============================================================
+-- CASOS CLÍNICOS / PRESENTACIÓN DINÁMICA EN VIVO (nuevo)
+-- ============================================================
+
+-- ---------- CASOS CLÍNICOS ----------
+create table if not exists casos_clinicos (
+  id uuid primary key default gen_random_uuid(),
+  region text not null,
+  titulo text not null,
+  vineta_clinica text not null,
+  media_url text,
+  media_tipo media_tipo_enum,
+  creado_por uuid references interrogadores(id),
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_casos_region on casos_clinicos(region);
+
+-- ---------- PUENTE: preguntas del banco, ordenadas dentro de un caso ----------
+create table if not exists caso_preguntas (
+  id uuid primary key default gen_random_uuid(),
+  caso_id uuid references casos_clinicos(id) on delete cascade not null,
+  pregunta_id uuid references banco_preguntas(id) not null,
+  orden int not null,
+  unique (caso_id, orden),
+  unique (caso_id, pregunta_id)
+);
+
+create index if not exists idx_caso_preguntas_caso on caso_preguntas(caso_id);
+
+-- ---------- PRESENTACIONES (reemplazo del PPT: set de casos, en orden, reutilizable) ----------
+create table if not exists presentaciones (
+  id uuid primary key default gen_random_uuid(),
+  titulo text not null,
+  region text,
+  creado_por uuid references interrogadores(id),
+  created_at timestamptz default now()
+);
+
+-- ---------- PUENTE: casos dentro de una presentación, ordenados ----------
+create table if not exists presentacion_casos (
+  id uuid primary key default gen_random_uuid(),
+  presentacion_id uuid references presentaciones(id) on delete cascade not null,
+  caso_id uuid references casos_clinicos(id) not null,
+  orden int not null,
+  unique (presentacion_id, orden),
+  unique (presentacion_id, caso_id)
+);
+
+create index if not exists idx_presentacion_casos_presentacion on presentacion_casos(presentacion_id);
+
+-- ---------- SESIÓN EN VIVO (una clase real, corriendo sobre una presentación) ----------
+create table if not exists sesiones_vivo (
+  id uuid primary key default gen_random_uuid(),
+  presentacion_id uuid references presentaciones(id) not null,
+  codigo_acceso text unique not null,
+  estado sesion_vivo_estado not null default 'esperando',
+  caso_actual_orden int not null default 1,
+  pregunta_actual_orden int not null default 1,
+  creado_por uuid references interrogadores(id),
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_sesiones_vivo_codigo on sesiones_vivo(codigo_acceso);
+
+-- ---------- VOTOS EN VIVO (nombre visible para el profesor, un voto por alumno por pregunta) ----------
+create table if not exists votos_vivo (
+  id uuid primary key default gen_random_uuid(),
+  sesion_id uuid references sesiones_vivo(id) on delete cascade not null,
+  pregunta_id uuid references banco_preguntas(id) not null,
+  alumno_id uuid references alumnos(id) not null,
+  opcion int not null,
+  created_at timestamptz default now(),
+  unique (sesion_id, pregunta_id, alumno_id)
+);
+
+create index if not exists idx_votos_vivo_sesion_pregunta on votos_vivo(sesion_id, pregunta_id);
 
 -- ---------- VISTAS DE ANÁLISIS DOCENTE ----------
 create or replace view analisis_preguntas as
