@@ -206,6 +206,12 @@ create table if not exists caso_preguntas (
 
 create index if not exists idx_caso_preguntas_caso on caso_preguntas(caso_id);
 
+-- Fundamento generado por Claude a partir de los materiales de la región,
+-- revisado y confirmado por el interrogador ANTES de quedar guardado aquí.
+-- Se llena una sola vez al preparar el caso, nunca en vivo durante la clase.
+alter table caso_preguntas add column if not exists explicacion_generada text;
+alter table caso_preguntas add column if not exists fuentes_generadas jsonb;
+
 -- ---------- PRESENTACIONES (reemplazo del PPT: set de casos, en orden, reutilizable) ----------
 create table if not exists presentaciones (
   id uuid primary key default gen_random_uuid(),
