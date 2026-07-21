@@ -6,7 +6,7 @@ main.py — organiza la app, monta los routers, y aplica schema.sql al arrancar.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, preguntas, materiales, sesiones, examen, analisis, documentos
+from routers import auth, preguntas, materiales, sesiones, examen, analisis, documentos, casos_vivo
 from db_init import inicializar_schema
 
 app = FastAPI(title="Examen Musculoesquelético API")
@@ -25,6 +25,7 @@ app.include_router(sesiones.router)
 app.include_router(examen.router)
 app.include_router(analisis.router)
 app.include_router(documentos.router)
+app.include_router(casos_vivo.router)
 
 
 @app.on_event("startup")
