@@ -12,6 +12,8 @@ dinamica en vivo. Cubre 2 momentos:
    y se guardan. Fundamento: Claude busca en los materiales docx de la
    region y redacta un BORRADOR, se revisa/edita y recien ahi se guarda.
    Armar presentaciones (varios casos, ordenados, reutilizables).
+   GET /casos/{caso_id} y GET /presentaciones/{presentacion_id} sirven
+   como lectura completa para el profesor (incluyen todas las preguntas).
 
 2) CONTROL EN VIVO (durante la clase): iniciar sesion desde una
    presentacion, avanzar el ciclo abrir_votacion -> cerrar_votacion
@@ -111,6 +113,7 @@ def listar_casos(region: Optional[str] = None, interrogador: dict = Depends(get_
 
 @router.get("/casos/{caso_id}")
 def obtener_caso(caso_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Lectura completa del caso para el profesor: datos + todas sus preguntas."""
     caso = sb.table("casos_clinicos").select("*").eq("id", caso_id).single().execute().data
     if not caso:
         raise HTTPException(404, "Caso no encontrado")
@@ -121,6 +124,14 @@ def obtener_caso(caso_id: str, interrogador: dict = Depends(get_current_interrog
 
     caso["preguntas"] = preguntas
     return caso
+
+@router.delete("/casos/{caso_id}")
+def borrar_caso(caso_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Borra el caso completo (sus preguntas se borran solas por cascada).
+    Tambien lo saca de cualquier presentacion donde estuviera agregado."""
+    sb.table("presentacion_casos").delete().eq("caso_id", caso_id).execute()
+    sb.table("casos_clinicos").delete().eq("id", caso_id).execute()
+    return {"ok": True}
 
 
 # ---------------- PREGUNTAS DEL CASO: escritas secuencialmente, con IA solo para alternativas falsas ----------------
@@ -272,6 +283,8 @@ def listar_presentaciones(interrogador: dict = Depends(get_current_interrogador)
 
 @router.get("/presentaciones/{presentacion_id}")
 def obtener_presentacion(presentacion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Lectura completa de la presentacion para el profesor: todos los casos,
+    ya ordenados, cada uno con sus preguntas."""
     pres = sb.table("presentaciones").select("*").eq("id", presentacion_id).single().execute().data
     if not pres:
         raise HTTPException(404, "Presentacion no encontrada")
@@ -289,6 +302,13 @@ def obtener_presentacion(presentacion_id: str, interrogador: dict = Depends(get_
 
     pres["casos"] = casos
     return pres
+
+@router.delete("/presentaciones/{presentacion_id}")
+def borrar_presentacion(presentacion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Borra la presentacion completa (los casos clinicos NO se borran, solo se
+    desvinculan de esta presentacion por cascada)."""
+    sb.table("presentaciones").delete().eq("id", presentacion_id).execute()
+    return {"ok": True}
 
 @router.post("/presentaciones/{presentacion_id}/casos")
 def agregar_caso_presentacion(presentacion_id: str, pc: PresentacionCasoIn, interrogador: dict = Depends(get_current_interrogador)):
