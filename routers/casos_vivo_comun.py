@@ -19,9 +19,28 @@ class CasoIn(BaseModel):
     titulo: str
     vineta_clinica: str
 
+class GenerarAlternativasCasoIn(BaseModel):
+    """El interrogador escribe la pregunta + la respuesta correcta.
+    Claude propone solo las 4 alternativas falsas (no guarda nada)."""
+    pregunta: str
+    respuesta_correcta: str
+
 class PreguntaCasoIn(BaseModel):
-    pregunta_id: str
+    """Guardado final de una pregunta del caso, ya revisada por el interrogador."""
     orden: int  # 1-5, fijo
+    pregunta: str
+    opciones: List[str]  # exactamente 5
+    correcta: int         # indice 0-4
+    media_url: Optional[str] = None
+    media_tipo: Optional[str] = None  # "foto" | "video"
+
+class PreguntaCasoUpdateIn(BaseModel):
+    """Editar una pregunta del caso ya guardada (no cambia el orden)."""
+    pregunta: str
+    opciones: List[str]
+    correcta: int
+    media_url: Optional[str] = None
+    media_tipo: Optional[str] = None
 
 class FundamentoIn(BaseModel):
     explicacion: str
@@ -45,7 +64,7 @@ class IngresoAlumnoIn(BaseModel):
 class VotarIn(BaseModel):
     sesion_id: str
     alumno_id: str
-    pregunta_id: str
+    pregunta_id: str  # id de caso_preguntas
     opcion: int
 
 class AccionIn(BaseModel):
@@ -69,20 +88,21 @@ def caso_actual(sesion: dict) -> Optional[dict]:
 
 def pregunta_actual(sesion: dict) -> Optional[dict]:
     """Resuelve la pregunta activa navegando presentacion->caso(orden)->pregunta(orden).
-    Incluye el fundamento ya revisado y guardado (explicacion_generada/fuentes_generadas)
-    y el caso clinico completo (para mostrar titulo + vineta + media del caso)."""
+    caso_preguntas ya NO depende de banco_preguntas: la pregunta, opciones,
+    correcta y su media viven directo en la fila. Devuelve un dict PLANO con
+    los campos de caso_preguntas + la clave "caso" con el caso clinico completo."""
     caso = caso_actual(sesion)
     if not caso:
         return None
 
-    pregunta_puente = sb.table("caso_preguntas").select(
-        "pregunta_id, explicacion_generada, fuentes_generadas, "
-        "banco_preguntas(id, pregunta, opciones, correcta, explicacion, media_url, media_tipo)"
+    filas = sb.table("caso_preguntas").select(
+        "id, pregunta, opciones, correcta, media_url, media_tipo, "
+        "explicacion_generada, fuentes_generadas"
     ).eq("caso_id", caso["id"]).eq("orden", sesion["pregunta_actual_orden"]).execute().data
-    if not pregunta_puente:
+    if not filas:
         return None
 
-    return {"caso": caso, **pregunta_puente[0]}
+    return {"caso": caso, **filas[0]}
 
 def total_preguntas_caso(caso_id: str) -> int:
     filas = sb.table("caso_preguntas").select("id").eq("caso_id", caso_id).execute().data
@@ -99,4 +119,4 @@ def url_firmada_media(bucket: str, storage_path: Optional[str], segundos: int = 
         return None
     firmada = sb.storage.from_(bucket).create_signed_url(storage_path, segundos)
     return firmada.get("signedURL") or firmada.get("signed_url")
-                      
+    
