@@ -40,8 +40,10 @@ def ingreso_alumno_vivo(codigo: str, body: IngresoAlumnoIn):
 @router.get("/vivo/{codigo}/actual")
 def estado_actual_alumno(codigo: str):
     """Pantalla del alumno/proyector. Muestra el caso clinico completo
-    (titulo + vineta + su media) y la pregunta activa. No expone la
-    respuesta correcta ni la explicacion salvo que el estado sea 'cerrada'."""
+    (titulo + vineta + su media) y la pregunta activa -con su propia
+    media independiente, ej. una radiografia distinta por pregunta-.
+    No expone la respuesta correcta ni la explicacion salvo que el
+    estado sea 'cerrada'."""
     sesion = sb.table("sesiones_vivo").select("*").eq("codigo_acceso", codigo).single().execute().data
     if not sesion:
         raise HTTPException(404, "Codigo de sesion invalido")
@@ -51,7 +53,6 @@ def estado_actual_alumno(codigo: str):
         return {"estado": sesion["estado"], "caso": None, "pregunta": None}
 
     caso = pregunta["caso"]
-    bp = pregunta["banco_preguntas"]
 
     salida = {
         "estado": sesion["estado"],
@@ -62,19 +63,19 @@ def estado_actual_alumno(codigo: str):
             "media_url": url_firmada_media("casos", caso.get("media_url")),
             "media_tipo": caso.get("media_tipo"),
         },
-        "pregunta_id": bp["id"],
-        "pregunta": bp["pregunta"],
-        "opciones": bp["opciones"],
-        "media_url": url_firmada_media("preguntas", bp.get("media_url")),
-        "media_tipo": bp["media_tipo"],
+        "pregunta_id": pregunta["id"],
+        "pregunta": pregunta["pregunta"],
+        "opciones": pregunta["opciones"],
+        "media_url": url_firmada_media("preguntas", pregunta.get("media_url")),
+        "media_tipo": pregunta.get("media_tipo"),
         "caso_actual_orden": sesion["caso_actual_orden"],
         "pregunta_actual_orden": sesion["pregunta_actual_orden"],
     }
 
     if sesion["estado"] == "cerrada":
-        salida["correcta"] = bp["correcta"]
+        salida["correcta"] = pregunta["correcta"]
         # Se lee lo ya preparado y revisado de antemano - nunca se genera aqui.
-        salida["explicacion"] = pregunta.get("explicacion_generada") or bp["explicacion"] or ""
+        salida["explicacion"] = pregunta.get("explicacion_generada") or ""
         salida["fuentes"] = pregunta.get("fuentes_generadas") or []
 
     return salida
@@ -82,7 +83,8 @@ def estado_actual_alumno(codigo: str):
 
 @router.post("/vivo/votar")
 def votar(body: VotarIn):
-    """Un voto por alumno por pregunta (protegido tambien por unique constraint en la BD)."""
+    """Un voto por alumno por pregunta (protegido tambien por unique constraint en la BD).
+    pregunta_id es el id de caso_preguntas."""
     ya_voto = sb.table("votos_vivo").select("id").eq(
         "sesion_id", body.sesion_id
     ).eq("pregunta_id", body.pregunta_id).eq("alumno_id", body.alumno_id).execute().data
@@ -110,14 +112,13 @@ def resultados_agregados(sesion_id: str):
     if not pregunta:
         return {"total": 0, "conteo": {}}
 
-    pregunta_id = pregunta["banco_preguntas"]["id"]
     votos = sb.table("votos_vivo").select("opcion").eq(
         "sesion_id", sesion_id
-    ).eq("pregunta_id", pregunta_id).execute().data
+    ).eq("pregunta_id", pregunta["id"]).execute().data
 
     conteo = {}
     for v in votos:
         conteo[v["opcion"]] = conteo.get(v["opcion"], 0) + 1
 
     return {"total": len(votos), "conteo": conteo}
-  
+    
