@@ -4,18 +4,21 @@ Endpoints PROTEGIDOS (requieren login de interrogador) de la presentacion
 dinamica en vivo. Cubre 2 momentos:
 
 1) PREPARACION (antes de la clase): crear casos clinicos con su media,
-   agregar preguntas del banco en orden fijo (1-5), generar un BORRADOR
-   de fundamento con Claude buscando en los materiales docx de la region
-   (services/fundamento_vivo.py), revisar/editar ese borrador y recien
-   ahi guardarlo. Armar presentaciones (varios casos, ordenados,
-   reutilizables - reemplazo del PPT).
+   ESCRIBIR sus preguntas una a una y en orden (1-5) - cada pregunta es
+   independiente del banco de examen, porque se redacta ya sabiendo el
+   contexto de las preguntas anteriores del mismo caso. El interrogador
+   escribe pregunta + respuesta correcta, Claude genera solo las 4
+   alternativas falsas (mismo patron que preguntas.py), se revisan/editan
+   y se guardan. Fundamento: Claude busca en los materiales docx de la
+   region y redacta un BORRADOR, se revisa/edita y recien ahi se guarda.
+   Armar presentaciones (varios casos, ordenados, reutilizables).
 
 2) CONTROL EN VIVO (durante la clase): iniciar sesion desde una
-   presentacion, y avanzar el ciclo abrir_votacion -> cerrar_votacion
+   presentacion, avanzar el ciclo abrir_votacion -> cerrar_votacion
    (discusion/fundamentos orales) -> revelar -> siguiente. 'revelar'
    NUNCA llama a Claude: solo expone lo que ya quedo guardado y
-   revisado de antemano. Tambien expone el detalle nombre->opcion para
-   que el profesor elija a quien pedir que fundamente en voz alta.
+   revisado de antemano. Expone el detalle nombre->opcion para que el
+   profesor elija a quien pedir que fundamente en voz alta.
 
 Complementa a casos_vivo_alumno.py (endpoints publicos del alumno).
 """
@@ -28,10 +31,13 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 
 from routers.auth import sb, get_current_interrogador
+from services.claude_client import generar_alternativas
 from services.fundamento_vivo import buscar_fundamento
 from routers.casos_vivo_comun import (
     CasoIn,
+    GenerarAlternativasCasoIn,
     PreguntaCasoIn,
+    PreguntaCasoUpdateIn,
     FundamentoIn,
     PresentacionIn,
     PresentacionCasoIn,
@@ -109,26 +115,100 @@ def obtener_caso(caso_id: str, interrogador: dict = Depends(get_current_interrog
     if not caso:
         raise HTTPException(404, "Caso no encontrado")
 
-    puente = sb.table("caso_preguntas").select(
-        "id, orden, pregunta_id, explicacion_generada, fuentes_generadas, "
-        "banco_preguntas(id, pregunta, opciones, correcta, explicacion, media_url, media_tipo, complejidad)"
+    preguntas = sb.table("caso_preguntas").select(
+        "id, orden, pregunta, opciones, correcta, media_url, media_tipo, explicacion_generada, fuentes_generadas"
     ).eq("caso_id", caso_id).order("orden").execute().data
 
-    caso["preguntas"] = puente
+    caso["preguntas"] = preguntas
     return caso
 
+
+# ---------------- PREGUNTAS DEL CASO: escritas secuencialmente, con IA solo para alternativas falsas ----------------
+
+@router.post("/casos/{caso_id}/preguntas/generar-alternativas")
+def generar_alternativas_pregunta_caso(caso_id: str, body: GenerarAlternativasCasoIn, interrogador: dict = Depends(get_current_interrogador)):
+    """El interrogador escribe la pregunta + respuesta correcta. Claude propone
+    solo las 4 alternativas falsas. No guarda nada todavia."""
+    caso = sb.table("casos_clinicos").select("region").eq("id", caso_id).single().execute().data
+    if not caso:
+        raise HTTPException(404, "Caso no encontrado")
+
+    incorrectas = generar_alternativas(
+        pregunta=body.pregunta,
+        respuesta_correcta=body.respuesta_correcta,
+        region=caso["region"],
+        complejidad="intermedia",
+    )
+
+    opciones = incorrectas + [body.respuesta_correcta]
+    random.shuffle(opciones)
+    correcta_idx = opciones.index(body.respuesta_correcta)
+
+    return {"opciones": opciones, "correcta": correcta_idx}
+
+@router.post("/casos/{caso_id}/preguntas/media")
+async def subir_media_pregunta_caso(
+    tipo: str = Form(...),  # "foto" | "video"
+    archivo: UploadFile = File(...),
+    interrogador: dict = Depends(get_current_interrogador),
+):
+    if tipo not in ("foto", "video"):
+        raise HTTPException(400, "Tipo invalido, debe ser 'foto' o 'video'")
+
+    contenido = await archivo.read()
+    storage_path = f"{int(time.time())}-{archivo.filename}"
+
+    # Reusa el bucket privado "preguntas" que ya existe (mismo patron que banco_preguntas).
+    sb.storage.from_("preguntas").upload(
+        storage_path, contenido, {"content-type": archivo.content_type}
+    )
+
+    return {"media_url": storage_path, "media_tipo": tipo}
+
 @router.post("/casos/{caso_id}/preguntas")
-def agregar_pregunta_caso(caso_id: str, p: PreguntaCasoIn, interrogador: dict = Depends(get_current_interrogador)):
+def crear_pregunta_caso(caso_id: str, p: PreguntaCasoIn, interrogador: dict = Depends(get_current_interrogador)):
+    """Guarda la pregunta YA REVISADA (alternativas confirmadas por el interrogador)."""
     if not (1 <= p.orden <= 5):
         raise HTTPException(400, "El orden debe estar entre 1 y 5")
+    if len(p.opciones) != 5:
+        raise HTTPException(400, "Deben ser exactamente 5 alternativas")
+    if not (0 <= p.correcta <= 4):
+        raise HTTPException(400, "El indice de la respuesta correcta debe estar entre 0 y 4")
 
     existe_orden = sb.table("caso_preguntas").select("id").eq("caso_id", caso_id).eq("orden", p.orden).execute().data
     if existe_orden:
         raise HTTPException(409, f"Ya existe una pregunta en el orden {p.orden} para este caso")
 
     res = sb.table("caso_preguntas").insert({
-        "caso_id": caso_id, "pregunta_id": p.pregunta_id, "orden": p.orden
+        "caso_id": caso_id,
+        "orden": p.orden,
+        "pregunta": p.pregunta,
+        "opciones": p.opciones,
+        "correcta": p.correcta,
+        "media_url": p.media_url,
+        "media_tipo": p.media_tipo,
+        "creado_por": interrogador["sub"],
     }).execute()
+    return res.data[0]
+
+@router.put("/casos/{caso_id}/preguntas/{caso_pregunta_id}")
+def actualizar_pregunta_caso(caso_id: str, caso_pregunta_id: str, p: PreguntaCasoUpdateIn, interrogador: dict = Depends(get_current_interrogador)):
+    """Editar una pregunta del caso ya guardada (texto, alternativas, correcta o media)."""
+    if len(p.opciones) != 5:
+        raise HTTPException(400, "Deben ser exactamente 5 alternativas")
+    if not (0 <= p.correcta <= 4):
+        raise HTTPException(400, "El indice de la respuesta correcta debe estar entre 0 y 4")
+
+    res = sb.table("caso_preguntas").update({
+        "pregunta": p.pregunta,
+        "opciones": p.opciones,
+        "correcta": p.correcta,
+        "media_url": p.media_url,
+        "media_tipo": p.media_tipo,
+    }).eq("id", caso_pregunta_id).eq("caso_id", caso_id).execute()
+
+    if not res.data:
+        raise HTTPException(404, "Pregunta del caso no encontrada")
     return res.data[0]
 
 @router.delete("/casos/{caso_id}/preguntas/{caso_pregunta_id}")
@@ -147,17 +227,18 @@ def generar_fundamento_borrador(caso_id: str, caso_pregunta_id: str, interrogado
         raise HTTPException(404, "Caso no encontrado")
 
     cp = sb.table("caso_preguntas").select(
-        "id, banco_preguntas(pregunta, opciones, correcta)"
+        "pregunta, opciones, correcta"
     ).eq("id", caso_pregunta_id).eq("caso_id", caso_id).single().execute().data
     if not cp:
         raise HTTPException(404, "Pregunta del caso no encontrada")
+    if not cp["pregunta"]:
+        raise HTTPException(409, "Esta pregunta todavia no tiene texto guardado")
 
-    bp = cp["banco_preguntas"]
     borrador = buscar_fundamento(
         region=caso["region"],
-        pregunta=bp["pregunta"],
-        opciones=bp["opciones"],
-        correcta=bp["correcta"],
+        pregunta=cp["pregunta"],
+        opciones=cp["opciones"],
+        correcta=cp["correcta"],
     )
     return borrador  # {"explicacion": ..., "fuentes": [...]} - sin guardar
 
@@ -202,7 +283,7 @@ def obtener_presentacion(presentacion_id: str, interrogador: dict = Depends(get_
     for c in casos:
         caso_id = c["casos_clinicos"]["id"]
         preguntas = sb.table("caso_preguntas").select(
-            "orden, pregunta_id, explicacion_generada, banco_preguntas(pregunta, opciones)"
+            "orden, pregunta, opciones"
         ).eq("caso_id", caso_id).order("orden").execute().data
         c["preguntas"] = preguntas
 
@@ -258,16 +339,16 @@ def obtener_sesion_profesor(sesion_id: str, interrogador: dict = Depends(get_cur
 
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral."""
+    """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral.
+    Cada pregunta del caso tiene su propia votacion (votos_vivo.pregunta_id -> caso_preguntas.id)."""
     sesion = obtener_sesion(sesion_id)
     pregunta = pregunta_actual(sesion)
     if not pregunta:
         return []
 
-    pregunta_id = pregunta["banco_preguntas"]["id"]
     votos = sb.table("votos_vivo").select(
         "opcion, created_at, alumnos(id, nombre, rut)"
-    ).eq("sesion_id", sesion_id).eq("pregunta_id", pregunta_id).order("created_at").execute().data
+    ).eq("sesion_id", sesion_id).eq("pregunta_id", pregunta["id"]).order("created_at").execute().data
 
     return votos
 
@@ -318,4 +399,3 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
         raise HTTPException(400, "Accion invalida")
 
     return obtener_sesion(sesion_id)
-                                                        
