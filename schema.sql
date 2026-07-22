@@ -54,7 +54,7 @@ create table if not exists alumnos (
   created_at timestamptz default now()
 );
 
--- ---------- BANCO DE PREGUNTAS ----------
+-- ---------- BANCO DE PREGUNTAS (examen individual, aleatorio) ----------
 create table if not exists banco_preguntas (
   id uuid primary key default gen_random_uuid(),
   region text not null,
@@ -194,15 +194,37 @@ create table if not exists casos_clinicos (
 
 create index if not exists idx_casos_region on casos_clinicos(region);
 
--- ---------- PUENTE: preguntas del banco, ordenadas dentro de un caso ----------
+-- ---------- PREGUNTAS DEL CASO ----------
+-- INDEPENDIENTES de banco_preguntas: son secuenciales y dinamicas, cada una
+-- escrita ya sabiendo el contexto de las preguntas anteriores del mismo caso
+-- (por eso NO se eligen de un banco generico). Se escriben una a una en el
+-- wizard, con la IA generando solo las alternativas falsas (el interrogador
+-- escribe la pregunta + la respuesta correcta).
 create table if not exists caso_preguntas (
   id uuid primary key default gen_random_uuid(),
   caso_id uuid references casos_clinicos(id) on delete cascade not null,
-  pregunta_id uuid references banco_preguntas(id) not null,
   orden int not null,
-  unique (caso_id, orden),
-  unique (caso_id, pregunta_id)
+  pregunta text,
+  opciones jsonb,
+  correcta int,
+  media_url text,
+  media_tipo media_tipo_enum,
+  creado_por uuid references interrogadores(id),
+  created_at timestamptz default now(),
+  unique (caso_id, orden)
 );
+
+-- Migracion desde el diseño anterior (puente a banco_preguntas): agrega las
+-- columnas nuevas si faltan, y quita el vinculo viejo si existia.
+alter table caso_preguntas add column if not exists pregunta text;
+alter table caso_preguntas add column if not exists opciones jsonb;
+alter table caso_preguntas add column if not exists correcta int;
+alter table caso_preguntas add column if not exists media_url text;
+alter table caso_preguntas add column if not exists media_tipo media_tipo_enum;
+alter table caso_preguntas add column if not exists creado_por uuid references interrogadores(id);
+
+alter table caso_preguntas drop constraint if exists caso_preguntas_caso_id_pregunta_id_key;
+alter table caso_preguntas drop column if exists pregunta_id;
 
 create index if not exists idx_caso_preguntas_caso on caso_preguntas(caso_id);
 
@@ -248,15 +270,20 @@ create table if not exists sesiones_vivo (
 create index if not exists idx_sesiones_vivo_codigo on sesiones_vivo(codigo_acceso);
 
 -- ---------- VOTOS EN VIVO (nombre visible para el profesor, un voto por alumno por pregunta) ----------
+-- pregunta_id ahora apunta a caso_preguntas (no a banco_preguntas).
 create table if not exists votos_vivo (
   id uuid primary key default gen_random_uuid(),
   sesion_id uuid references sesiones_vivo(id) on delete cascade not null,
-  pregunta_id uuid references banco_preguntas(id) not null,
+  pregunta_id uuid not null,
   alumno_id uuid references alumnos(id) not null,
   opcion int not null,
   created_at timestamptz default now(),
   unique (sesion_id, pregunta_id, alumno_id)
 );
+
+alter table votos_vivo drop constraint if exists votos_vivo_pregunta_id_fkey;
+alter table votos_vivo add constraint votos_vivo_pregunta_id_fkey
+  foreign key (pregunta_id) references caso_preguntas(id);
 
 create index if not exists idx_votos_vivo_sesion_pregunta on votos_vivo(sesion_id, pregunta_id);
 
