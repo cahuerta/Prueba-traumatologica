@@ -71,8 +71,7 @@ def buscar_fundamento(region: str, pregunta: str, opciones: List[str], correcta:
         "Redacta un resumen CORTO (maximo 4-5 lineas), fundamentado, que explique por que "
         "esa es la respuesta correcta, basandote unicamente en el material de referencia "
         "entregado arriba. No copies el texto completo del material, sintetiza el argumento "
-        "clinico clave. Si el material no aborda directamente la pregunta, indicalo brevemente "
-        "en vez de inventar contenido."
+        "clinico clave."
     )
 
     mensaje = client.messages.create(
@@ -84,4 +83,4 @@ def buscar_fundamento(region: str, pregunta: str, opciones: List[str], correcta:
     explicacion = "".join(bloque.text for bloque in mensaje.content if bloque.type == "text")
 
     return {"explicacion": explicacion.strip(), "fuentes": fuentes}
-  
+    
