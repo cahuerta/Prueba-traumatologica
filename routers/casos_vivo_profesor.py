@@ -305,8 +305,10 @@ def obtener_presentacion(presentacion_id: str, interrogador: dict = Depends(get_
 
 @router.delete("/presentaciones/{presentacion_id}")
 def borrar_presentacion(presentacion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Borra la presentacion completa (los casos clinicos NO se borran, solo se
-    desvinculan de esta presentacion por cascada)."""
+    """Borra la presentacion completa. Primero borra sus sesiones en vivo
+    asociadas (los votos se van solos por cascada) para no violar la
+    foreign key; los casos clinicos NO se borran, solo se desvinculan."""
+    sb.table("sesiones_vivo").delete().eq("presentacion_id", presentacion_id).execute()
     sb.table("presentaciones").delete().eq("id", presentacion_id).execute()
     return {"ok": True}
 
@@ -351,6 +353,21 @@ def iniciar_sesion(body: IniciarSesionIn, interrogador: dict = Depends(get_curre
         "creado_por": interrogador["sub"],
     }).execute()
     return res.data[0]
+
+@router.get("/vivo")
+def listar_sesiones_activas(interrogador: dict = Depends(get_current_interrogador)):
+    """Sesiones en vivo que no han terminado (estado != 'cerrada'), con el
+    titulo de su presentacion, para poder retomarlas o borrarlas."""
+    sesiones = sb.table("sesiones_vivo").select(
+        "id, codigo_acceso, estado, created_at, presentaciones(titulo)"
+    ).neq("estado", "cerrada").order("created_at", desc=True).execute().data
+    return sesiones
+
+@router.delete("/vivo/{sesion_id}")
+def borrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Borra una sesion en vivo (sus votos se van solos por cascada)."""
+    sb.table("sesiones_vivo").delete().eq("id", sesion_id).execute()
+    return {"ok": True}
 
 @router.get("/vivo/{sesion_id}")
 def obtener_sesion_profesor(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
@@ -419,3 +436,4 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
         raise HTTPException(400, "Accion invalida")
 
     return obtener_sesion(sesion_id)
+   
