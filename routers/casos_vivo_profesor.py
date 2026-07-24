@@ -20,7 +20,9 @@ dinamica en vivo. Cubre 2 momentos:
    (discusion/fundamentos orales) -> revelar -> siguiente. 'revelar'
    NUNCA llama a Claude: solo expone lo que ya quedo guardado y
    revisado de antemano. Expone el detalle nombre->opcion para que el
-   profesor elija a quien pedir que fundamente en voz alta.
+   profesor elija a quien pedir que fundamente en voz alta. Tambien
+   expone quien ha marcado asistencia (ingreso a la sesion), sin
+   necesidad de haber votado ninguna pregunta.
 
 Complementa a casos_vivo_alumno.py (endpoints publicos del alumno).
 """
@@ -33,6 +35,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 
 from routers.auth import sb, get_current_interrogador
+from routers.conjuntos_comun import obtener_conjunto_activo_id
 from services.claude_client import generar_alternativas
 from services.fundamento_vivo import buscar_fundamento
 from routers.casos_vivo_comun import (
@@ -374,6 +377,21 @@ def obtener_sesion_profesor(sesion_id: str, interrogador: dict = Depends(get_cur
     """Devuelve la sesion completa (incluyendo codigo_acceso) para el panel del profesor."""
     return obtener_sesion(sesion_id)
 
+@router.get("/vivo/{sesion_id}/asistencia")
+def ver_asistencia_vivo(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Panel del profesor: quien ha marcado asistencia (ingreso) a esta
+    sesion, haya votado o no. El total de habilitados es el tamaño del
+    conjunto de alumnos activo."""
+    conjunto_id = obtener_conjunto_activo_id()
+
+    presentes = sb.table("asistencia_vivo").select(
+        "alumno_id, marcado_at, alumnos(nombre, rut)"
+    ).eq("sesion_id", sesion_id).order("marcado_at").execute().data
+
+    total = sb.table("alumnos").select("id", count="exact").eq("conjunto_id", conjunto_id).execute()
+
+    return {"presentes": presentes, "total_habilitados": total.count, "total_presentes": len(presentes)}
+
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral.
@@ -388,6 +406,7 @@ def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_inter
     ).eq("sesion_id", sesion_id).eq("pregunta_id", pregunta["id"]).order("created_at").execute().data
 
     return votos
+
 
 @router.post("/vivo/{sesion_id}/accion")
 def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(get_current_interrogador)):
@@ -436,4 +455,3 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
         raise HTTPException(400, "Accion invalida")
 
     return obtener_sesion(sesion_id)
-   
