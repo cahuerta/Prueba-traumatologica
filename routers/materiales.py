@@ -1,8 +1,9 @@
 """
 routers/materiales.py
 PPT y resúmenes que suben los interrogadores, organizados por región.
-El alumno entra por un QR fijo (nombre + RUT, validado contra alumnos
-ya existentes), y cada visita/descarga queda registrada para el análisis.
+El alumno entra por un QR fijo (nombre + RUT, validado contra el
+conjunto de alumnos actualmente activo), y cada visita/descarga queda
+registrada para el análisis.
 """
 
 import time
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador
+from routers.conjuntos_comun import obtener_conjunto_activo_id
 
 router = APIRouter(prefix="/materiales", tags=["materiales"])
 
@@ -69,11 +71,13 @@ def listar_materiales(region: Optional[str] = None):
 # ---------------- INGRESO DEL ALUMNO (QR fijo, nombre + RUT) ----------------
 @router.post("/ingreso")
 def ingreso_materiales(body: IngresoIn):
-    """Valida contra alumnos ya existentes (creados al ser habilitados en alguna sesión).
-    Si el RUT no existe en el sistema, no entra."""
-    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).execute().data
+    """Valida contra el conjunto de alumnos actualmente activo.
+    Si el RUT no existe en ese conjunto, no entra."""
+    conjunto_id = obtener_conjunto_activo_id()
+
+    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).eq("conjunto_id", conjunto_id).execute().data
     if not alumno:
-        raise HTTPException(403, "RUT no reconocido en el sistema")
+        raise HTTPException(403, "RUT no reconocido en el conjunto activo")
     alumno_id = alumno[0]["id"]
 
     sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
@@ -100,8 +104,10 @@ def descargar_material(material_id: str, body: DescargaIn):
 # ---------------- ANÁLISIS (para el admin/interrogador) ----------------
 @router.get("/analisis")
 def analisis_materiales(interrogador: dict = Depends(get_current_interrogador)):
+    conjunto_id = obtener_conjunto_activo_id()
+
     por_material = sb.table("analisis_descargas_material").select("*").execute().data
-    por_alumno = sb.table("analisis_actividad_alumno").select("*").order("total_visitas", desc=True).execute().data
+    por_alumno = sb.table("analisis_actividad_alumno").select("*").eq("conjunto_id", conjunto_id).order("total_visitas", desc=True).execute().data
     materiales_info = sb.table("materiales").select("id, region, tipo, titulo").execute().data
 
     materiales_map = {m["id"]: m for m in materiales_info}
