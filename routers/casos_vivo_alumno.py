@@ -8,6 +8,7 @@ interrogador. Complementa a casos_vivo_profesor.py (control de la sesion).
 from fastapi import APIRouter, HTTPException
 
 from routers.auth import sb
+from routers.conjuntos_comun import obtener_conjunto_activo_id
 from routers.casos_vivo_comun import (
     IngresoAlumnoIn,
     VotarIn,
@@ -21,15 +22,17 @@ router = APIRouter(prefix="/casos-vivo", tags=["casos-vivo-alumno"])
 
 @router.post("/vivo/{codigo}/ingreso")
 def ingreso_alumno_vivo(codigo: str, body: IngresoAlumnoIn):
-    """El alumno entra desde el link/QR de la sesion, con nombre + RUT
-    (reusa la tabla 'alumnos' ya validada en materiales.py)."""
+    """El alumno entra desde el link/QR de la sesion, con nombre + RUT,
+    validado contra el conjunto de alumnos actualmente activo."""
     sesion = sb.table("sesiones_vivo").select("id").eq("codigo_acceso", codigo).execute().data
     if not sesion:
         raise HTTPException(404, "Codigo de sesion invalido")
 
-    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).execute().data
+    conjunto_id = obtener_conjunto_activo_id()
+
+    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).eq("conjunto_id", conjunto_id).execute().data
     if not alumno:
-        raise HTTPException(403, "RUT no reconocido en el sistema")
+        raise HTTPException(403, "RUT no reconocido en el conjunto activo")
     alumno_id = alumno[0]["id"]
 
     sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
