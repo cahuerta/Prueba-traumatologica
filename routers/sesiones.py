@@ -1,18 +1,21 @@
 """
 routers/sesiones.py
-Ciclo de vida de una sesión de examen ("clase"): alumnos habilitados
-(creados/vinculados desde nombre+RUT, pegados desde Excel), asistencia
-por nombre+RUT (sin lista clicable, se corrobora contra los habilitados),
-encuesta en vivo, y la tabla de resultados con el detalle de cada
-pregunta respondida.
-"""
+Ciclo de vida de una sesión de examen ("clase"): asistencia por
+nombre+RUT validada contra el conjunto de alumnos activo, encuesta en
+vivo, y la tabla de resultados con el detalle de cada pregunta
+respondida.
 
-from typing import List
+Los alumnos ya no se cargan por sesión: el listado vive en el conjunto
+activo (ver routers/alumnos.py y routers/conjuntos.py). Cualquier RUT
+que este dentro del conjunto activo puede marcar asistencia en
+cualquier sesión.
+"""
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador, requiere_admin
+from routers.conjuntos_comun import obtener_conjunto_activo_id
 
 router = APIRouter(prefix="/sesiones", tags=["sesiones"])
 
@@ -20,14 +23,9 @@ PAQUETES = ("agil", "estandar", "exigente")
 
 
 # ---------------- MODELOS ----------------
-class AlumnoIn(BaseModel):
-    nombre: str
-    rut: str
-
 class SesionIn(BaseModel):
     nombre: str
     fecha: str  # YYYY-MM-DD
-    alumnos: List[AlumnoIn]  # pegados desde Excel: nombre + RUT por fila
 
 class VotoIn(BaseModel):
     alumno_id: str
@@ -41,32 +39,12 @@ class AsistenciaIn(BaseModel):
 # ---------------- CREACIÓN Y LISTADO DE SESIONES (admin) ----------------
 @router.post("")
 def crear_sesion(s: SesionIn, admin: dict = Depends(requiere_admin)):
+    """La sesión ya no recibe ni crea alumnos: cualquier alumno del
+    conjunto activo puede marcar asistencia en ella."""
     res = sb.table("sesiones_examen").insert({
         "nombre": s.nombre, "fecha": s.fecha, "estado": "creada", "creado_por": admin["sub"]
     }).execute()
-    sesion = res.data[0]
-
-    alumno_ids = []
-    for a in s.alumnos:
-        rut = a.rut.strip()
-        nombre = a.nombre.strip()
-        if not rut:
-            continue
-        existente = sb.table("alumnos").select("id").eq("rut", rut).execute().data
-        if existente:
-            alumno_id = existente[0]["id"]
-            if nombre:
-                sb.table("alumnos").update({"nombre": nombre}).eq("id", alumno_id).execute()
-        else:
-            nuevo = sb.table("alumnos").insert({"rut": rut, "nombre": nombre}).execute().data[0]
-            alumno_id = nuevo["id"]
-        alumno_ids.append(alumno_id)
-
-    rows = [{"sesion_id": sesion["id"], "alumno_id": aid} for aid in alumno_ids]
-    if rows:
-        sb.table("sesion_alumnos").insert(rows).execute()
-
-    return sesion
+    return res.data[0]
 
 @router.get("")
 def listar_sesiones(interrogador: dict = Depends(get_current_interrogador)):
@@ -80,7 +58,7 @@ def ver_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrog
     return res
 
 
-# ---------------- ASISTENCIA (ingreso por nombre + RUT, sin lista clicable) ----------------
+# ---------------- ASISTENCIA (ingreso por nombre + RUT, contra el conjunto activo) ----------------
 @router.post("/{sesion_id}/abrir-asistencia")
 def abrir_asistencia(sesion_id: str, admin: dict = Depends(requiere_admin)):
     sb.table("sesiones_examen").update({"estado": "asistencia"}).eq("id", sesion_id).execute()
@@ -88,15 +66,14 @@ def abrir_asistencia(sesion_id: str, admin: dict = Depends(requiere_admin)):
 
 @router.post("/{sesion_id}/asistencia")
 def marcar_asistencia(sesion_id: str, body: AsistenciaIn):
-    """El alumno escribe su nombre y RUT. Se corrobora contra los habilitados de esta sesión."""
-    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).execute().data
-    if not alumno:
-        raise HTTPException(403, "RUT no habilitado para esta sesión")
-    alumno_id = alumno[0]["id"]
+    """El alumno escribe su nombre y RUT. Se corrobora contra el
+    conjunto de alumnos actualmente activo."""
+    conjunto_id = obtener_conjunto_activo_id()
 
-    habilitado = sb.table("sesion_alumnos").select("alumno_id").eq("sesion_id", sesion_id).eq("alumno_id", alumno_id).execute().data
-    if not habilitado:
-        raise HTTPException(403, "Este alumno no está habilitado para esta sesión")
+    alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).eq("conjunto_id", conjunto_id).execute().data
+    if not alumno:
+        raise HTTPException(403, "RUT no reconocido en el conjunto activo")
+    alumno_id = alumno[0]["id"]
 
     sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
     sb.table("asistencia").upsert({"sesion_id": sesion_id, "alumno_id": alumno_id}).execute()
@@ -105,9 +82,12 @@ def marcar_asistencia(sesion_id: str, body: AsistenciaIn):
 
 @router.get("/{sesion_id}/asistencia")
 def ver_asistencia(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Consola docente: quién ha marcado asistencia hasta ahora, en vivo."""
+    """Consola docente: quién ha marcado asistencia hasta ahora, en vivo.
+    El total de habilitados es el tamaño del conjunto activo."""
+    conjunto_id = obtener_conjunto_activo_id()
+
     res = sb.table("asistencia").select("alumno_id, marcado_at, alumnos(nombre, rut)").eq("sesion_id", sesion_id).order("marcado_at").execute().data
-    total = sb.table("sesion_alumnos").select("alumno_id", count="exact").eq("sesion_id", sesion_id).execute()
+    total = sb.table("alumnos").select("id", count="exact").eq("conjunto_id", conjunto_id).execute()
     return {"presentes": res, "total_habilitados": total.count, "total_presentes": len(res)}
 
 
@@ -191,3 +171,4 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
+    
