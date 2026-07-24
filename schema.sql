@@ -313,6 +313,17 @@ alter table votos_vivo add constraint votos_vivo_pregunta_id_fkey
 
 create index if not exists idx_votos_vivo_sesion_pregunta on votos_vivo(sesion_id, pregunta_id);
 
+-- ---------- ASISTENCIA A SESION EN VIVO (registro del ingreso, independiente
+-- de si el alumno llega a votar alguna pregunta o no) ----------
+create table if not exists asistencia_vivo (
+  sesion_id uuid references sesiones_vivo(id) on delete cascade,
+  alumno_id uuid references alumnos(id) on delete cascade,
+  marcado_at timestamptz default now(),
+  primary key (sesion_id, alumno_id)
+);
+
+create index if not exists idx_asistencia_vivo_alumno on asistencia_vivo(alumno_id);
+
 -- ---------- VISTAS DE ANÁLISIS DOCENTE ----------
 create or replace view analisis_preguntas as
 select
