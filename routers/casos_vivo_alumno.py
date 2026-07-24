@@ -37,7 +37,10 @@ def ingreso_alumno_vivo(codigo: str, body: IngresoAlumnoIn):
 
     sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
 
-    return {"sesion_id": sesion[0]["id"], "alumno_id": alumno_id}
+    sesion_id = sesion[0]["id"]
+    sb.table("asistencia_vivo").upsert({"sesion_id": sesion_id, "alumno_id": alumno_id}).execute()
+
+    return {"sesion_id": sesion_id, "alumno_id": alumno_id}
 
 
 @router.get("/vivo/{codigo}/actual")
