@@ -366,12 +366,16 @@ select
 from descargas_materiales
 group by material_id;
 
+-- NOTA: conjunto_id va AL FINAL del select. Postgres no permite que
+-- "create or replace view" inserte una columna en medio del orden ya
+-- existente (lo trata como renombrar la columna que queda desplazada,
+-- lo cual no está permitido) - solo se pueden agregar columnas al final.
 create or replace view analisis_actividad_alumno as
 select
   a.id as alumno_id,
   a.nombre,
   a.rut,
-  a.conjunto_id,
   (select count(*) from visitas_materiales v where v.alumno_id = a.id) as total_visitas,
-  (select count(*) from descargas_materiales d where d.alumno_id = a.id) as total_descargas
+  (select count(*) from descargas_materiales d where d.alumno_id = a.id) as total_descargas,
+  a.conjunto_id
 from alumnos a;
