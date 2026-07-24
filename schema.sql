@@ -46,6 +46,20 @@ create table if not exists interrogadores (
   created_at timestamptz default now()
 );
 
+-- ---------- CONJUNTOS (paquete de alumnos: una generación por año, o un
+-- conjunto de prueba con pocos alumnos. Solo uno debe estar activo a la
+-- vez -eso lo controla el endpoint, no una restriccion SQL-. El selector
+-- en Configuración marca cuál está activo.) ----------
+create table if not exists conjuntos (
+  id uuid primary key default gen_random_uuid(),
+  nombre text not null,           -- ej. "Generación 2026", "Test"
+  tipo text not null default 'oficial',  -- 'oficial' o 'test'
+  activo boolean not null default false,
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_conjuntos_activo on conjuntos(activo);
+
 -- ---------- ALUMNOS ----------
 create table if not exists alumnos (
   id uuid primary key default gen_random_uuid(),
@@ -53,6 +67,18 @@ create table if not exists alumnos (
   nombre text not null,
   created_at timestamptz default now()
 );
+
+-- Vinculo al conjunto (generación/test) al que pertenece este alumno.
+alter table alumnos add column if not exists conjunto_id uuid references conjuntos(id);
+
+-- El mismo RUT puede repetirse en otro conjunto (ej. repite curso al año
+-- siguiente), asi que la unicidad ya no es global por rut, sino por
+-- (conjunto_id, rut). Se quita la restriccion unica global y se reemplaza.
+alter table alumnos drop constraint if exists alumnos_rut_key;
+alter table alumnos drop constraint if exists alumnos_conjunto_id_rut_key;
+alter table alumnos add constraint alumnos_conjunto_id_rut_key unique (conjunto_id, rut);
+
+create index if not exists idx_alumnos_conjunto on alumnos(conjunto_id);
 
 -- ---------- BANCO DE PREGUNTAS (examen individual, aleatorio) ----------
 create table if not exists banco_preguntas (
@@ -334,6 +360,7 @@ select
   a.id as alumno_id,
   a.nombre,
   a.rut,
+  a.conjunto_id,
   (select count(*) from visitas_materiales v where v.alumno_id = a.id) as total_visitas,
   (select count(*) from descargas_materiales d where d.alumno_id = a.id) as total_descargas
 from alumnos a;
