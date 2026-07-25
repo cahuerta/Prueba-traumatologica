@@ -9,11 +9,13 @@ from fastapi import APIRouter, HTTPException
 
 from routers.auth import sb
 from routers.conjuntos_comun import obtener_conjunto_activo_id
+from routers import cache_vivo
 from services import votos_local
 from routers.casos_vivo_comun import (
     IngresoAlumnoIn,
     VotarIn,
     obtener_sesion,
+    obtener_sesion_por_codigo,
     pregunta_actual,
     url_firmada_media,
 )
@@ -40,6 +42,7 @@ def ingreso_alumno_vivo(codigo: str, body: IngresoAlumnoIn):
 
     sesion_id = sesion[0]["id"]
     sb.table("asistencia_vivo").upsert({"sesion_id": sesion_id, "alumno_id": alumno_id}).execute()
+    cache_vivo.invalidar_asistencia(sesion_id)
 
     return {"sesion_id": sesion_id, "alumno_id": alumno_id}
 
@@ -51,9 +54,7 @@ def estado_actual_alumno(codigo: str):
     media independiente, ej. una radiografia distinta por pregunta-.
     No expone la respuesta correcta ni la explicacion salvo que el
     estado sea 'cerrada'."""
-    sesion = sb.table("sesiones_vivo").select("*").eq("codigo_acceso", codigo).single().execute().data
-    if not sesion:
-        raise HTTPException(404, "Codigo de sesion invalido")
+    sesion = obtener_sesion_por_codigo(codigo)
 
     pregunta = pregunta_actual(sesion)
     if not pregunta:
@@ -122,4 +123,3 @@ def resultados_agregados(sesion_id: str):
         return {"total": 0, "conteo": {}}
 
     return votos_local.obtener_resultados(sesion_id, pregunta["id"])
-    
