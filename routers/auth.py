@@ -12,17 +12,28 @@ Variables de entorno esperadas (Render):
 import os
 
 import bcrypt
+import httpx
 import jwt
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGO = "HS256"
 
-sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+# Se fuerza HTTP/1.1 en vez de HTTP/2: bajo carga concurrente alta (muchas
+# peticiones simultaneas, ej. varios alumnos a la vez), el cliente HTTP/2
+# compartido de httpx puede corromper su stream multiplexado y devolver
+# "Exception in ASGI application" en cascada. HTTP/1.1 abre conexiones
+# separadas en vez de compartir un solo stream, evitando ese problema.
+_http_client = httpx.Client(http2=False)
+sb: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_KEY,
+    options=ClientOptions(httpx_client=_http_client),
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
