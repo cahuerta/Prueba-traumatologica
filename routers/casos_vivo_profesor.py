@@ -30,6 +30,12 @@ dinamica en vivo. Cubre 2 momentos:
    vuelcan todos de una sola vez a Supabase (votos_vivo), para el
    guardado permanente.
 
+   El estado de la sesion (estado/caso_actual_orden/pregunta_actual_orden)
+   y la asistencia pasan por la cache en memoria (routers/cache_vivo.py):
+   avanzar_sesion actualiza la cache directo en cada accion, y
+   ver_asistencia_vivo se sirve de ahi salvo que alguien acabe de
+   ingresar (invalidada en casos_vivo_alumno.py).
+
 Complementa a casos_vivo_alumno.py (endpoints publicos del alumno).
 """
 
@@ -42,6 +48,7 @@ from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 
 from routers.auth import sb, get_current_interrogador
 from routers.conjuntos_comun import obtener_conjunto_activo_id
+from routers import cache_vivo
 from services.claude_client import generar_alternativas
 from services.fundamento_vivo import buscar_fundamento
 from services import votos_local
@@ -230,11 +237,14 @@ def actualizar_pregunta_caso(caso_id: str, caso_pregunta_id: str, p: PreguntaCas
 
     if not res.data:
         raise HTTPException(404, "Pregunta del caso no encontrada")
+
+    cache_vivo.invalidar_pregunta(caso_id)
     return res.data[0]
 
 @router.delete("/casos/{caso_id}/preguntas/{caso_pregunta_id}")
 def quitar_pregunta_caso(caso_id: str, caso_pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
     sb.table("caso_preguntas").delete().eq("id", caso_pregunta_id).eq("caso_id", caso_id).execute()
+    cache_vivo.invalidar_pregunta(caso_id)
     return {"ok": True}
 
 
@@ -273,6 +283,8 @@ def guardar_fundamento_revisado(caso_id: str, caso_pregunta_id: str, body: Funda
 
     if not res.data:
         raise HTTPException(404, "Pregunta del caso no encontrada")
+
+    cache_vivo.invalidar_pregunta(caso_id)
     return res.data[0]
 
 
@@ -331,11 +343,13 @@ def agregar_caso_presentacion(presentacion_id: str, pc: PresentacionCasoIn, inte
     res = sb.table("presentacion_casos").insert({
         "presentacion_id": presentacion_id, "caso_id": pc.caso_id, "orden": pc.orden
     }).execute()
+    cache_vivo.invalidar_posiciones_presentacion(presentacion_id)
     return res.data[0]
 
 @router.delete("/presentaciones/{presentacion_id}/casos/{presentacion_caso_id}")
 def quitar_caso_presentacion(presentacion_id: str, presentacion_caso_id: str, interrogador: dict = Depends(get_current_interrogador)):
     sb.table("presentacion_casos").delete().eq("id", presentacion_caso_id).eq("presentacion_id", presentacion_id).execute()
+    cache_vivo.invalidar_posiciones_presentacion(presentacion_id)
     return {"ok": True}
 
 
@@ -377,6 +391,7 @@ def listar_sesiones_activas(interrogador: dict = Depends(get_current_interrogado
 def borrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Borra una sesion en vivo (sus votos se van solos por cascada)."""
     sb.table("sesiones_vivo").delete().eq("id", sesion_id).execute()
+    cache_vivo.invalidar_sesion(sesion_id)
     return {"ok": True}
 
 @router.get("/vivo/{sesion_id}")
@@ -388,7 +403,12 @@ def obtener_sesion_profesor(sesion_id: str, interrogador: dict = Depends(get_cur
 def ver_asistencia_vivo(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Panel del profesor: quien ha marcado asistencia (ingreso) a esta
     sesion, haya votado o no. El total de habilitados es el tamaño del
-    conjunto de alumnos activo."""
+    conjunto de alumnos activo. Se sirve desde cache salvo que alguien
+    acabe de ingresar (invalidada en casos_vivo_alumno.py)."""
+    cacheada = cache_vivo.obtener_asistencia_cache(sesion_id)
+    if cacheada is not None:
+        return cacheada
+
     conjunto_id = obtener_conjunto_activo_id()
 
     presentes = sb.table("asistencia_vivo").select(
@@ -397,7 +417,9 @@ def ver_asistencia_vivo(sesion_id: str, interrogador: dict = Depends(get_current
 
     total = sb.table("alumnos").select("id", count="exact").eq("conjunto_id", conjunto_id).execute()
 
-    return {"presentes": presentes, "total_habilitados": total.count, "total_presentes": len(presentes)}
+    resultado = {"presentes": presentes, "total_habilitados": total.count, "total_presentes": len(presentes)}
+    cache_vivo.guardar_asistencia_cache(sesion_id, resultado)
+    return resultado
 
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
@@ -431,23 +453,33 @@ def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_inter
 def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(get_current_interrogador)):
     """El profesor controla el ciclo: abrir_votacion -> cerrar_votacion (discusion) -> revelar -> siguiente.
     'revelar' NUNCA llama a Claude: solo cambia el estado para exponer lo ya guardado de antemano.
-    'cerrar_votacion' vuelca todos los votos acumulados en el archivo local a Supabase de una sola vez."""
+    'cerrar_votacion' vuelca todos los votos acumulados en el archivo local a Supabase de una sola vez.
+    Cada cambio de estado se actualiza tambien en la cache en memoria, para
+    que el proximo GET no tenga que ir a buscarlo de nuevo a Supabase."""
     sesion = obtener_sesion(sesion_id)
 
     if body.accion == "abrir_votacion":
-        sb.table("sesiones_vivo").update({"estado": "votando"}).eq("id", sesion_id).execute()
+        cambios = {"estado": "votando"}
+        sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+        cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
 
     elif body.accion == "cerrar_votacion":
         lote_votos = votos_local.volcar_y_limpiar(sesion_id)
         if lote_votos:
             sb.table("votos_vivo").insert(lote_votos).execute()
-        sb.table("sesiones_vivo").update({"estado": "discusion"}).eq("id", sesion_id).execute()
+
+        cambios = {"estado": "discusion"}
+        sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+        cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
 
     elif body.accion == "revelar":
         pregunta = pregunta_actual(sesion)
         if not pregunta:
             raise HTTPException(409, "No hay pregunta activa para revelar")
-        sb.table("sesiones_vivo").update({"estado": "cerrada"}).eq("id", sesion_id).execute()
+
+        cambios = {"estado": "cerrada"}
+        sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+        cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
 
     elif body.accion == "siguiente":
         caso = caso_actual(sesion)
@@ -458,21 +490,20 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
         siguiente_pregunta = sesion["pregunta_actual_orden"] + 1
 
         if siguiente_pregunta <= total_preguntas:
-            sb.table("sesiones_vivo").update({
-                "pregunta_actual_orden": siguiente_pregunta,
-                "estado": "esperando",
-            }).eq("id", sesion_id).execute()
+            cambios = {"pregunta_actual_orden": siguiente_pregunta, "estado": "esperando"}
+            sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+            cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
         else:
             total_casos = total_casos_presentacion(sesion["presentacion_id"])
             siguiente_caso = sesion["caso_actual_orden"] + 1
             if siguiente_caso <= total_casos:
-                sb.table("sesiones_vivo").update({
-                    "caso_actual_orden": siguiente_caso,
-                    "pregunta_actual_orden": 1,
-                    "estado": "esperando",
-                }).eq("id", sesion_id).execute()
+                cambios = {"caso_actual_orden": siguiente_caso, "pregunta_actual_orden": 1, "estado": "esperando"}
+                sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+                cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
             else:
-                sb.table("sesiones_vivo").update({"estado": "cerrada"}).eq("id", sesion_id).execute()
+                cambios = {"estado": "cerrada"}
+                sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+                cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
                 return {"ok": True, "finalizada": True}
     else:
         raise HTTPException(400, "Accion invalida")
