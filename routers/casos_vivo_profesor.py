@@ -507,5 +507,7 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
                 return {"ok": True, "finalizada": True}
     else:
         raise HTTPException(400, "Accion invalida")
-
+    sesion_actualizada = obtener_sesion(sesion_id)
+    pregunta_actual(sesion_actualizada)  # precalienta la cache antes de que los alumnos pregunten
+   
     return obtener_sesion(sesion_id)
