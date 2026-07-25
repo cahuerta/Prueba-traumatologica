@@ -106,18 +106,25 @@ def obtener_alumnos_que_votaron(sesion_id: str, pregunta_id: str) -> list[dict]:
     ]
 
 
-def volcar_y_limpiar(sesion_id: str) -> list[dict]:
+def volcar_a_supabase(sesion_id: str) -> list[dict]:
     """Devuelve la lista de votos acumulados (para que el caller los
-    inserte en Supabase) y limpia el archivo local. Se llama al cerrar
-    la votacion."""
+    inserte en Supabase). Se llama al cerrar la votacion.
+
+    IMPORTANTE: ya NO borra el archivo local -antes lo hacia, y eso
+    dejaba el conteo en cero justo durante la discusion/revelada, que
+    es cuando mas importa seguir viendolo-. En vez de eso, marca la
+    hoja como "volcado" para no duplicar el insert si se llama dos
+    veces. El archivo se reinicia solo, de forma natural, cuando llega
+    el primer voto de la SIGUIENTE pregunta (ver registrar_voto)."""
     data = _cargar(sesion_id)
     pregunta_id = data["pregunta_id"]
     votos = data["votos"]
 
-    _guardar(sesion_id, {"pregunta_id": None, "votos": {}})
-
-    if not pregunta_id:
+    if not pregunta_id or data.get("volcado"):
         return []
+
+    data["volcado"] = True
+    _guardar(sesion_id, data)
 
     return [
         {
@@ -127,5 +134,5 @@ def volcar_y_limpiar(sesion_id: str) -> list[dict]:
             "opcion": v["opcion"],
         }
         for alumno_id, v in votos.items()
-                                ]
+    ]
   
