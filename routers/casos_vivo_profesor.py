@@ -449,6 +449,7 @@ def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_inter
         for v in votos_locales
     ]
 
+
 @router.post("/vivo/{sesion_id}/accion")
 def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(get_current_interrogador)):
     """El profesor controla el ciclo: abrir_votacion -> cerrar_votacion (discusion) -> revelar -> siguiente.
@@ -464,7 +465,7 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
         cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
 
     elif body.accion == "cerrar_votacion":
-        lote_votos = votos_local.volcar_y_limpiar(sesion_id)
+        lote_votos = votos_local.volcar_a_supabase(sesion_id)
         if lote_votos:
             sb.table("votos_vivo").insert(lote_votos).execute()
 
@@ -507,7 +508,5 @@ def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(
                 return {"ok": True, "finalizada": True}
     else:
         raise HTTPException(400, "Accion invalida")
-    sesion_actualizada = obtener_sesion(sesion_id)
-    pregunta_actual(sesion_actualizada)  # precalienta la cache antes de que los alumnos pregunten
-   
+
     return obtener_sesion(sesion_id)
