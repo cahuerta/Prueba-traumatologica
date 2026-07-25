@@ -42,7 +42,8 @@ def panel_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interr
 
     return {
         **estado,
+        "codigo_acceso": codigo_acceso,
         "resultados": resultados,
         "asistencia": asistencia,
     }
-  
+    
