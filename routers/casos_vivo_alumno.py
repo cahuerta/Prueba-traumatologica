@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from routers.auth import sb
 from routers.conjuntos_comun import obtener_conjunto_activo_id
+from services import votos_local
 from routers.casos_vivo_comun import (
     IngresoAlumnoIn,
     VotarIn,
@@ -89,42 +90,36 @@ def estado_actual_alumno(codigo: str):
 
 @router.post("/vivo/votar")
 def votar(body: VotarIn):
-    """Un voto por alumno por pregunta (protegido tambien por unique constraint en la BD).
-    pregunta_id es el id de caso_preguntas."""
-    ya_voto = sb.table("votos_vivo").select("id").eq(
-        "sesion_id", body.sesion_id
-    ).eq("pregunta_id", body.pregunta_id).eq("alumno_id", body.alumno_id).execute().data
-    if ya_voto:
-        raise HTTPException(409, "Este alumno ya voto esta pregunta")
-
+    """Un voto por alumno por pregunta. Se guarda en el archivo local del
+    Render Disk (no en Supabase) mientras la votacion sigue en curso -esto
+    evita que muchos alumnos votando casi al mismo tiempo disparen
+    escrituras concurrentes a Supabase-. Se vuelca todo a Supabase de una
+    sola vez cuando el admin cierra la votacion (ver avanzar_sesion)."""
     sesion = obtener_sesion(body.sesion_id)
     if sesion["estado"] != "votando":
         raise HTTPException(409, "La votacion no esta abierta en este momento")
 
-    res = sb.table("votos_vivo").insert({
-        "sesion_id": body.sesion_id,
-        "pregunta_id": body.pregunta_id,
-        "alumno_id": body.alumno_id,
-        "opcion": body.opcion,
-    }).execute()
-    return res.data[0]
+    registrado = votos_local.registrar_voto(
+        sesion_id=body.sesion_id,
+        pregunta_id=body.pregunta_id,
+        alumno_id=body.alumno_id,
+        opcion=body.opcion,
+    )
+    if not registrado:
+        raise HTTPException(409, "Este alumno ya voto esta pregunta")
+
+    return {"ok": True}
 
 
 @router.get("/vivo/{sesion_id}/resultados")
 def resultados_agregados(sesion_id: str):
-    """Solo el agregado por opcion (sin nombres), para la pantalla proyectada."""
+    """Solo el agregado por opcion (sin nombres), para la pantalla proyectada.
+    Se lee del archivo local mientras la pregunta sigue activa -no toca
+    Supabase-."""
     sesion = obtener_sesion(sesion_id)
     pregunta = pregunta_actual(sesion)
     if not pregunta:
         return {"total": 0, "conteo": {}}
 
-    votos = sb.table("votos_vivo").select("opcion").eq(
-        "sesion_id", sesion_id
-    ).eq("pregunta_id", pregunta["id"]).execute().data
-
-    conteo = {}
-    for v in votos:
-        conteo[v["opcion"]] = conteo.get(v["opcion"], 0) + 1
-
-    return {"total": len(votos), "conteo": conteo}
+    return votos_local.obtener_resultados(sesion_id, pregunta["id"])
     
