@@ -24,6 +24,12 @@ dinamica en vivo. Cubre 2 momentos:
    expone quien ha marcado asistencia (ingreso a la sesion), sin
    necesidad de haber votado ninguna pregunta.
 
+   Los votos de la pregunta ACTIVA viven en un archivo local (Render
+   Disk, ver services/votos_local.py) mientras la votacion esta en
+   curso -no en Supabase-. Recien al ejecutar "cerrar_votacion" se
+   vuelcan todos de una sola vez a Supabase (votos_vivo), para el
+   guardado permanente.
+
 Complementa a casos_vivo_alumno.py (endpoints publicos del alumno).
 """
 
@@ -38,6 +44,7 @@ from routers.auth import sb, get_current_interrogador
 from routers.conjuntos_comun import obtener_conjunto_activo_id
 from services.claude_client import generar_alternativas
 from services.fundamento_vivo import buscar_fundamento
+from services import votos_local
 from routers.casos_vivo_comun import (
     CasoIn,
     GenerarAlternativasCasoIn,
@@ -395,29 +402,45 @@ def ver_asistencia_vivo(sesion_id: str, interrogador: dict = Depends(get_current
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral.
-    Cada pregunta del caso tiene su propia votacion (votos_vivo.pregunta_id -> caso_preguntas.id)."""
+    Se lee del archivo local (Render Disk) mientras la pregunta sigue
+    activa -los votos todavia no se han volcado a Supabase-, y se
+    completan los nombres con una consulta puntual a la tabla alumnos."""
     sesion = obtener_sesion(sesion_id)
     pregunta = pregunta_actual(sesion)
     if not pregunta:
         return []
 
-    votos = sb.table("votos_vivo").select(
-        "opcion, created_at, alumnos(id, nombre, rut)"
-    ).eq("sesion_id", sesion_id).eq("pregunta_id", pregunta["id"]).order("created_at").execute().data
+    votos_locales = votos_local.obtener_alumnos_que_votaron(sesion_id, pregunta["id"])
+    if not votos_locales:
+        return []
 
-    return votos
+    alumno_ids = [v["alumno_id"] for v in votos_locales]
+    alumnos_info = sb.table("alumnos").select("id, nombre, rut").in_("id", alumno_ids).execute().data
+    alumnos_por_id = {a["id"]: a for a in alumnos_info}
 
+    return [
+        {
+            "opcion": v["opcion"],
+            "created_at": v["votado_at"],
+            "alumnos": alumnos_por_id.get(v["alumno_id"]),
+        }
+        for v in votos_locales
+    ]
 
 @router.post("/vivo/{sesion_id}/accion")
 def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(get_current_interrogador)):
     """El profesor controla el ciclo: abrir_votacion -> cerrar_votacion (discusion) -> revelar -> siguiente.
-    'revelar' NUNCA llama a Claude: solo cambia el estado para exponer lo ya guardado de antemano."""
+    'revelar' NUNCA llama a Claude: solo cambia el estado para exponer lo ya guardado de antemano.
+    'cerrar_votacion' vuelca todos los votos acumulados en el archivo local a Supabase de una sola vez."""
     sesion = obtener_sesion(sesion_id)
 
     if body.accion == "abrir_votacion":
         sb.table("sesiones_vivo").update({"estado": "votando"}).eq("id", sesion_id).execute()
 
     elif body.accion == "cerrar_votacion":
+        lote_votos = votos_local.volcar_y_limpiar(sesion_id)
+        if lote_votos:
+            sb.table("votos_vivo").insert(lote_votos).execute()
         sb.table("sesiones_vivo").update({"estado": "discusion"}).eq("id", sesion_id).execute()
 
     elif body.accion == "revelar":
