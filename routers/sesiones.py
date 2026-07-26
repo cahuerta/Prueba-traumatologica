@@ -129,8 +129,13 @@ def cerrar_encuesta(sesion_id: str, admin: dict = Depends(requiere_admin)):
 def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """
     Por cada alumno que rindió: su nota/puntaje, y el detalle de cada
-    pregunta que le tocó (enunciado, su respuesta, si fue correcta,
-    la alternativa correcta y la explicación).
+    pregunta que le tocó (enunciado, su respuesta, si fue correcta, la
+    alternativa correcta y la explicación). Las preguntas de casos
+    clinicos viven en una tabla de respuestas aparte (respuestas_caso,
+    con su propia foreign key estricta a caso_preguntas) porque una
+    sola FK no puede apuntar a dos tablas distintas segun el origen de
+    la pregunta -se leen por separado y se juntan aqui en un solo
+    detalle, ya ordenadas para el profesor.
     """
     instancias = sb.table("examen_instancia").select(
         "id, alumno_id, paquete, puntaje_total, porcentaje, nota, iniciado_at, finalizado_at, salidas_detectadas, alumnos(nombre, rut)"
@@ -138,12 +143,16 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
 
     resultados = []
     for inst in instancias:
-        respuestas = sb.table("respuestas").select(
+        respuestas_banco = sb.table("respuestas").select(
             "pregunta_id, opcion_elegida, correcta, banco_preguntas(pregunta, opciones, correcta, explicacion, region, complejidad)"
         ).eq("examen_instancia_id", inst["id"]).execute().data
 
+        respuestas_caso = sb.table("respuestas_caso").select(
+            "pregunta_id, opcion_elegida, correcta, caso_preguntas(pregunta, opciones, correcta, explicacion_generada)"
+        ).eq("examen_instancia_id", inst["id"]).execute().data
+
         detalle = []
-        for r in respuestas:
+        for r in respuestas_banco:
             bp = r["banco_preguntas"]
             detalle.append({
                 "pregunta": bp["pregunta"],
@@ -154,6 +163,18 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
                 "respuesta_correcta": bp["opciones"][bp["correcta"]],
                 "correcta": r["correcta"],
                 "explicacion": bp["explicacion"],
+            })
+        for r in respuestas_caso:
+            cp = r["caso_preguntas"]
+            detalle.append({
+                "pregunta": cp["pregunta"],
+                "region": None,
+                "complejidad": "caso_clinico",
+                "opciones": cp["opciones"],
+                "respuesta_alumno": cp["opciones"][r["opcion_elegida"]],
+                "respuesta_correcta": cp["opciones"][cp["correcta"]],
+                "correcta": r["correcta"],
+                "explicacion": cp["explicacion_generada"],
             })
 
         resultados.append({
@@ -171,4 +192,4 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
-    
+            
