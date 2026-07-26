@@ -57,13 +57,20 @@ def _conjunto_activo_es_test() -> bool:
 
 
 # ---------------- HELPERS: preguntas individuales (banco) ----------------
-def _seleccionar_preguntas(paquete: str, flexible: bool = False):
+def _seleccionar_preguntas(paquete: str, modo_test: bool = False):
+    """Con el conjunto oficial activo: solo preguntas clinicas reales
+    (region distinta de 'administrativo'), exigiendo la cuota completa.
+    Con el conjunto TEST activo: solo preguntas 'administrativo' (para
+    la demo/ejemplo institucional), con cuota flexible -toma lo que
+    haya, sin exigir el banco completo-."""
     cuotas = PAQUETES[paquete]["n"]
     seleccion = {}
     for complejidad, cantidad in cuotas.items():
-        disponibles = sb.table("banco_preguntas").select("id").eq("activo", True).eq("complejidad", complejidad).execute().data
+        q = sb.table("banco_preguntas").select("id").eq("activo", True).eq("complejidad", complejidad)
+        q = q.eq("region", "administrativo") if modo_test else q.neq("region", "administrativo")
+        disponibles = q.execute().data
         ids = [r["id"] for r in disponibles]
-        if flexible:
+        if modo_test:
             cantidad = min(cantidad, len(ids))
         elif len(ids) < cantidad:
             raise HTTPException(409, f"No hay suficientes preguntas '{complejidad}' en el banco ({len(ids)}/{cantidad})")
@@ -95,29 +102,29 @@ def _generar_orden_opciones(pregunta_ids: list, n_opciones: int = 5):
 
 
 # ---------------- HELPERS: seccion de casos clinicos ----------------
-def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD, flexible: bool = False):
+def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD, modo_test: bool = False):
     """Elige 'cantidad' casos clinicos al azar (de los que ya tienen
     preguntas guardadas) para la seccion final del examen. Cada bloque
     se devuelve con sus preguntas YA EN SU ORDEN ORIGINAL (1-5): el
     contexto del caso se mantiene intacto, nunca se mezcla el orden de
     las preguntas dentro de un mismo caso.
 
-    Los casos de region 'administrativo' (presentaciones institucionales,
-    de introduccion al modulo, etc. -no clinicas-) quedan EXCLUIDOS: solo
-    sirven para Presentacion en vivo, nunca deben caerle a un alumno en
-    su examen."""
+    Con el conjunto oficial activo: solo casos clinicos reales (region
+    distinta de 'administrativo'), exigiendo la cantidad completa. Con
+    el conjunto TEST activo: solo casos 'administrativo' (demo/ejemplo
+    institucional), con cantidad flexible."""
     filas = sb.table("caso_preguntas").select("caso_id").execute().data
     caso_ids_con_preguntas = list({f["caso_id"] for f in filas})
 
     if caso_ids_con_preguntas:
-        filas_clinicos = sb.table("casos_clinicos").select("id") \
-            .neq("region", "administrativo") \
-            .in_("id", caso_ids_con_preguntas).execute().data
+        q = sb.table("casos_clinicos").select("id").in_("id", caso_ids_con_preguntas)
+        q = q.eq("region", "administrativo") if modo_test else q.neq("region", "administrativo")
+        filas_clinicos = q.execute().data
         caso_ids_disponibles = [f["id"] for f in filas_clinicos]
     else:
         caso_ids_disponibles = []
 
-    if flexible:
+    if modo_test:
         cantidad = min(cantidad, len(caso_ids_disponibles))
     elif len(caso_ids_disponibles) < cantidad:
         raise HTTPException(409, f"No hay suficientes casos clínicos con preguntas guardadas ({len(caso_ids_disponibles)}/{cantidad})")
@@ -162,9 +169,9 @@ def iniciar_examen(body: IniciarExamenIn):
         instancia = existente[0]
     else:
         paquete = sesion["paquete_elegido"]
-        modo_flexible = _conjunto_activo_es_test()
+        modo_test = _conjunto_activo_es_test()
 
-        seleccion = _seleccionar_preguntas(paquete, flexible=modo_flexible)
+        seleccion = _seleccionar_preguntas(paquete, modo_test=modo_test)
         pregunta_ids = [qid for ids in seleccion.values() for qid in ids]
         random.shuffle(pregunta_ids)
 
@@ -172,7 +179,7 @@ def iniciar_examen(body: IniciarExamenIn):
         # DESPUES de las preguntas individuales. Cada bloque va intacto
         # y en orden; el orden ENTRE bloques (cual caso va primero) si
         # queda al azar, segun la seleccion de _seleccionar_casos_clinicos.
-        bloques_casos = _seleccionar_casos_clinicos(flexible=modo_flexible)
+        bloques_casos = _seleccionar_casos_clinicos(modo_test=modo_test)
         caso_pregunta_ids = [p["id"] for bloque in bloques_casos for p in bloque]
         pregunta_ids += caso_pregunta_ids
 
