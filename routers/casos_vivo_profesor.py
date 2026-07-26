@@ -16,13 +16,17 @@ dinamica en vivo. Cubre 2 momentos:
    como lectura completa para el profesor (incluyen todas las preguntas).
 
 2) CONTROL EN VIVO (durante la clase): iniciar sesion desde una
-   presentacion, avanzar el ciclo abrir_votacion -> cerrar_votacion
-   (discusion/fundamentos orales) -> revelar -> siguiente. 'revelar'
-   NUNCA llama a Claude: solo expone lo que ya quedo guardado y
-   revisado de antemano. Expone el detalle nombre->opcion para que el
-   profesor elija a quien pedir que fundamente en voz alta. Tambien
-   expone quien ha marcado asistencia (ingreso a la sesion), sin
-   necesidad de haber votado ninguna pregunta.
+   presentacion, avanzar el ciclo mostrar_caso -> abrir_votacion ->
+   cerrar_votacion (discusion/fundamentos orales) -> revelar -> siguiente.
+   'mostrar_caso' pasa de 'esperando' a 'presentando': recien ahi
+   Proyeccion y el alumno muestran la vineta clinica + imagen del caso
+   (antes de eso solo se ve QR/asistencia en Proyeccion y una pantalla
+   generica de espera en el alumno). 'revelar' NUNCA llama a Claude:
+   solo expone lo que ya quedo guardado y revisado de antemano. Expone
+   el detalle nombre->opcion para que el profesor elija a quien pedir
+   que fundamente en voz alta. Tambien expone quien ha marcado
+   asistencia (ingreso a la sesion), sin necesidad de haber votado
+   ninguna pregunta.
 
    Los votos de la pregunta ACTIVA viven en un archivo local (Render
    Disk, ver services/votos_local.py) mientras la votacion esta en
@@ -421,6 +425,7 @@ def ver_asistencia_vivo(sesion_id: str, interrogador: dict = Depends(get_current
     cache_vivo.guardar_asistencia_cache(sesion_id, resultado)
     return resultado
 
+
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral.
@@ -452,14 +457,24 @@ def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_inter
 
 @router.post("/vivo/{sesion_id}/accion")
 def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(get_current_interrogador)):
-    """El profesor controla el ciclo: abrir_votacion -> cerrar_votacion (discusion) -> revelar -> siguiente.
+    """El profesor controla el ciclo: mostrar_caso -> abrir_votacion -> cerrar_votacion (discusion) -> revelar -> siguiente.
+    'mostrar_caso' solo es valida mientras 'esperando' (arranque de cada caso, pregunta 1):
+    pasa a 'presentando' para que Proyeccion y el alumno muestren la vineta clinica + imagen.
     'revelar' NUNCA llama a Claude: solo cambia el estado para exponer lo ya guardado de antemano.
     'cerrar_votacion' vuelca todos los votos acumulados en el archivo local a Supabase de una sola vez.
     Cada cambio de estado se actualiza tambien en la cache en memoria, para
     que el proximo GET no tenga que ir a buscarlo de nuevo a Supabase."""
     sesion = obtener_sesion(sesion_id)
 
-    if body.accion == "abrir_votacion":
+    if body.accion == "mostrar_caso":
+        if sesion["estado"] != "esperando":
+            raise HTTPException(409, "Solo se puede mostrar el caso mientras se espera (estado 'esperando')")
+
+        cambios = {"estado": "presentando"}
+        sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
+        cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
+
+    elif body.accion == "abrir_votacion":
         cambios = {"estado": "votando"}
         sb.table("sesiones_vivo").update(cambios).eq("id", sesion_id).execute()
         cache_vivo.actualizar_sesion_cache(sesion_id, cambios)
