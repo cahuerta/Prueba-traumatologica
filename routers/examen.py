@@ -41,6 +41,7 @@ CASOS_CLINICOS_CANTIDAD = 4
 class IniciarExamenIn(BaseModel):
     sesion_id: str
     alumno_id: str
+    item: str = "clinico"  # "clinico" | "administrativo" -enviado por el frontend en el momento mismo de iniciar, no se guarda en ninguna tabla-
 
 class ResponderIn(BaseModel):
     pregunta_id: str
@@ -48,26 +49,27 @@ class ResponderIn(BaseModel):
 
 
 def _conjunto_activo_es_test() -> bool:
-    """Si el conjunto activo es de tipo 'test', el examen se arma con
-    cuotas flexibles (lo que haya disponible) en vez de exigir el banco
-    completo -sirve para probar el flujo sin esperar tener las 200
-    preguntas y los 4 casos clinicos completos."""
+    """Si el conjunto activo es de tipo 'test', las cuotas del examen
+    son flexibles (toma lo que haya disponible) en vez de exigir el
+    banco completo -sirve para probar el flujo sin esperar tener las
+    200 preguntas y los 4 casos clinicos completos. Esto es INDEPENDIENTE
+    de que el contenido sea clinico o administrativo -eso lo decide
+    'item', no el conjunto-."""
     fila = sb.table("conjuntos").select("tipo").eq("activo", True).execute().data
     return bool(fila) and fila[0]["tipo"] == "test"
 
 
 # ---------------- HELPERS: preguntas individuales (banco) ----------------
-def _seleccionar_preguntas(paquete: str, modo_test: bool = False):
-    """Con el conjunto oficial activo: solo preguntas clinicas reales
-    (region distinta de 'administrativo'), exigiendo la cuota completa.
-    Con el conjunto TEST activo: solo preguntas 'administrativo' (para
-    la demo/ejemplo institucional), con cuota flexible -toma lo que
-    haya, sin exigir el banco completo-."""
+def _seleccionar_preguntas(paquete: str, item: str = "clinico", modo_test: bool = False):
+    """'item' decide el CONTENIDO (region 'administrativo' o clinico
+    -todo lo demas-), independiente de 'modo_test' que solo decide si
+    la CUOTA es flexible o estricta. Los 4 cruces posibles: test+clinico,
+    test+administrativo, oficial+clinico, oficial+administrativo."""
     cuotas = PAQUETES[paquete]["n"]
     seleccion = {}
     for complejidad, cantidad in cuotas.items():
         q = sb.table("banco_preguntas").select("id").eq("activo", True).eq("complejidad", complejidad)
-        q = q.eq("region", "administrativo") if modo_test else q.neq("region", "administrativo")
+        q = q.eq("region", "administrativo") if item == "administrativo" else q.neq("region", "administrativo")
         disponibles = q.execute().data
         ids = [r["id"] for r in disponibles]
         if modo_test:
@@ -102,23 +104,22 @@ def _generar_orden_opciones(pregunta_ids: list, n_opciones: int = 5):
 
 
 # ---------------- HELPERS: seccion de casos clinicos ----------------
-def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD, modo_test: bool = False):
+def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD, item: str = "clinico", modo_test: bool = False):
     """Elige 'cantidad' casos clinicos al azar (de los que ya tienen
     preguntas guardadas) para la seccion final del examen. Cada bloque
     se devuelve con sus preguntas YA EN SU ORDEN ORIGINAL (1-5): el
     contexto del caso se mantiene intacto, nunca se mezcla el orden de
     las preguntas dentro de un mismo caso.
 
-    Con el conjunto oficial activo: solo casos clinicos reales (region
-    distinta de 'administrativo'), exigiendo la cantidad completa. Con
-    el conjunto TEST activo: solo casos 'administrativo' (demo/ejemplo
-    institucional), con cantidad flexible."""
+    'item' decide el CONTENIDO (region 'administrativo' o clinico),
+    independiente de 'modo_test' que solo decide si la CANTIDAD es
+    flexible o estricta."""
     filas = sb.table("caso_preguntas").select("caso_id").execute().data
     caso_ids_con_preguntas = list({f["caso_id"] for f in filas})
 
     if caso_ids_con_preguntas:
         q = sb.table("casos_clinicos").select("id").in_("id", caso_ids_con_preguntas)
-        q = q.eq("region", "administrativo") if modo_test else q.neq("region", "administrativo")
+        q = q.eq("region", "administrativo") if item == "administrativo" else q.neq("region", "administrativo")
         filas_clinicos = q.execute().data
         caso_ids_disponibles = [f["id"] for f in filas_clinicos]
     else:
@@ -171,7 +172,7 @@ def iniciar_examen(body: IniciarExamenIn):
         paquete = sesion["paquete_elegido"]
         modo_test = _conjunto_activo_es_test()
 
-        seleccion = _seleccionar_preguntas(paquete, modo_test=modo_test)
+        seleccion = _seleccionar_preguntas(paquete, item=body.item, modo_test=modo_test)
         pregunta_ids = [qid for ids in seleccion.values() for qid in ids]
         random.shuffle(pregunta_ids)
 
@@ -179,7 +180,7 @@ def iniciar_examen(body: IniciarExamenIn):
         # DESPUES de las preguntas individuales. Cada bloque va intacto
         # y en orden; el orden ENTRE bloques (cual caso va primero) si
         # queda al azar, segun la seleccion de _seleccionar_casos_clinicos.
-        bloques_casos = _seleccionar_casos_clinicos(modo_test=modo_test)
+        bloques_casos = _seleccionar_casos_clinicos(item=body.item, modo_test=modo_test)
         caso_pregunta_ids = [p["id"] for bloque in bloques_casos for p in bloque]
         pregunta_ids += caso_pregunta_ids
 
