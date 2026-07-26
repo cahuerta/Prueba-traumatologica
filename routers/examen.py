@@ -100,9 +100,22 @@ def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD, flexibl
     preguntas guardadas) para la seccion final del examen. Cada bloque
     se devuelve con sus preguntas YA EN SU ORDEN ORIGINAL (1-5): el
     contexto del caso se mantiene intacto, nunca se mezcla el orden de
-    las preguntas dentro de un mismo caso."""
+    las preguntas dentro de un mismo caso.
+
+    Los casos de region 'administrativo' (presentaciones institucionales,
+    de introduccion al modulo, etc. -no clinicas-) quedan EXCLUIDOS: solo
+    sirven para Presentacion en vivo, nunca deben caerle a un alumno en
+    su examen."""
     filas = sb.table("caso_preguntas").select("caso_id").execute().data
-    caso_ids_disponibles = list({f["caso_id"] for f in filas})
+    caso_ids_con_preguntas = list({f["caso_id"] for f in filas})
+
+    if caso_ids_con_preguntas:
+        filas_clinicos = sb.table("casos_clinicos").select("id") \
+            .neq("region", "administrativo") \
+            .in_("id", caso_ids_con_preguntas).execute().data
+        caso_ids_disponibles = [f["id"] for f in filas_clinicos]
+    else:
+        caso_ids_disponibles = []
 
     if flexible:
         cantidad = min(cantidad, len(caso_ids_disponibles))
