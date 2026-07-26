@@ -47,22 +47,35 @@ class ResponderIn(BaseModel):
     opcion_elegida: int  # posición mostrada al alumno (ya mezclada), no el índice original
 
 
+def _conjunto_activo_es_test() -> bool:
+    """Si el conjunto activo es de tipo 'test', el examen se arma con
+    cuotas flexibles (lo que haya disponible) en vez de exigir el banco
+    completo -sirve para probar el flujo sin esperar tener las 200
+    preguntas y los 4 casos clinicos completos."""
+    fila = sb.table("conjuntos").select("tipo").eq("activo", True).execute().data
+    return bool(fila) and fila[0]["tipo"] == "test"
+
+
 # ---------------- HELPERS: preguntas individuales (banco) ----------------
-def _seleccionar_preguntas(paquete: str):
+def _seleccionar_preguntas(paquete: str, flexible: bool = False):
     cuotas = PAQUETES[paquete]["n"]
     seleccion = {}
     for complejidad, cantidad in cuotas.items():
         disponibles = sb.table("banco_preguntas").select("id").eq("activo", True).eq("complejidad", complejidad).execute().data
         ids = [r["id"] for r in disponibles]
-        if len(ids) < cantidad:
+        if flexible:
+            cantidad = min(cantidad, len(ids))
+        elif len(ids) < cantidad:
             raise HTTPException(409, f"No hay suficientes preguntas '{complejidad}' en el banco ({len(ids)}/{cantidad})")
-        seleccion[complejidad] = random.sample(ids, cantidad)
+        seleccion[complejidad] = random.sample(ids, cantidad) if cantidad else []
     return seleccion
 
 def _calcular_puntos(seleccion: dict):
     """Recibe un dict {clave_de_peso: [ids]} -incluye tanto complejidades
     del banco como 'caso_clinico'- y re-normaliza TODO junto a 100."""
     total_peso = sum(PESO_BASE[c] * len(ids) for c, ids in seleccion.items())
+    if total_peso == 0:
+        return {}
     escala = 100 / total_peso
     puntos = {}
     for clave, ids in seleccion.items():
@@ -82,7 +95,7 @@ def _generar_orden_opciones(pregunta_ids: list, n_opciones: int = 5):
 
 
 # ---------------- HELPERS: seccion de casos clinicos ----------------
-def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD):
+def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD, flexible: bool = False):
     """Elige 'cantidad' casos clinicos al azar (de los que ya tienen
     preguntas guardadas) para la seccion final del examen. Cada bloque
     se devuelve con sus preguntas YA EN SU ORDEN ORIGINAL (1-5): el
@@ -90,8 +103,14 @@ def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD):
     las preguntas dentro de un mismo caso."""
     filas = sb.table("caso_preguntas").select("caso_id").execute().data
     caso_ids_disponibles = list({f["caso_id"] for f in filas})
-    if len(caso_ids_disponibles) < cantidad:
+
+    if flexible:
+        cantidad = min(cantidad, len(caso_ids_disponibles))
+    elif len(caso_ids_disponibles) < cantidad:
         raise HTTPException(409, f"No hay suficientes casos clínicos con preguntas guardadas ({len(caso_ids_disponibles)}/{cantidad})")
+
+    if cantidad == 0:
+        return []
 
     elegidos = random.sample(caso_ids_disponibles, cantidad)
 
@@ -130,8 +149,9 @@ def iniciar_examen(body: IniciarExamenIn):
         instancia = existente[0]
     else:
         paquete = sesion["paquete_elegido"]
+        modo_flexible = _conjunto_activo_es_test()
 
-        seleccion = _seleccionar_preguntas(paquete)
+        seleccion = _seleccionar_preguntas(paquete, flexible=modo_flexible)
         pregunta_ids = [qid for ids in seleccion.values() for qid in ids]
         random.shuffle(pregunta_ids)
 
@@ -139,7 +159,7 @@ def iniciar_examen(body: IniciarExamenIn):
         # DESPUES de las preguntas individuales. Cada bloque va intacto
         # y en orden; el orden ENTRE bloques (cual caso va primero) si
         # queda al azar, segun la seleccion de _seleccionar_casos_clinicos.
-        bloques_casos = _seleccionar_casos_clinicos()
+        bloques_casos = _seleccionar_casos_clinicos(flexible=modo_flexible)
         caso_pregunta_ids = [p["id"] for bloque in bloques_casos for p in bloque]
         pregunta_ids += caso_pregunta_ids
 
@@ -286,3 +306,4 @@ def registrar_salida(instancia_id: str):
         return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
 
     return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
+    
