@@ -104,15 +104,17 @@ def _seleccionar_casos_clinicos(cantidad: int = CASOS_CLINICOS_CANTIDAD):
             bloques.append(preguntas)
     return bloques
 
-def _obtener_correcta(pregunta_id: str) -> int:
+def _info_pregunta(pregunta_id: str):
     """La pregunta puede venir del banco o de un caso clinico -viven en
-    tablas distintas-, asi que se busca en ambas."""
+    tablas distintas, y cada una anota su respuesta en una tabla de
+    respuestas separada (respuestas / respuestas_caso), cada cual con
+    su propia foreign key estricta-. Devuelve (origen, indice_correcto)."""
     fila = sb.table("banco_preguntas").select("correcta").eq("id", pregunta_id).execute().data
     if fila:
-        return fila[0]["correcta"]
+        return "banco", fila[0]["correcta"]
     fila = sb.table("caso_preguntas").select("correcta").eq("id", pregunta_id).execute().data
     if fila:
-        return fila[0]["correcta"]
+        return "caso", fila[0]["correcta"]
     raise HTTPException(404, "Pregunta no encontrada")
 
 
@@ -221,7 +223,7 @@ def responder(instancia_id: str, body: ResponderIn):
     if not instancia["iniciado_at"]:
         sb.table("examen_instancia").update({"iniciado_at": datetime.now(timezone.utc).isoformat()}).eq("id", instancia_id).execute()
 
-    correcta_idx = _obtener_correcta(body.pregunta_id)
+    origen, correcta_idx = _info_pregunta(body.pregunta_id)
 
     # La opción elegida viene en la posición MOSTRADA (mezclada); se traduce al índice original.
     mapeo = (instancia["orden_opciones"] or {}).get(body.pregunta_id)
@@ -229,7 +231,8 @@ def responder(instancia_id: str, body: ResponderIn):
 
     correcta = correcta_idx == opcion_original
 
-    sb.table("respuestas").upsert({
+    tabla = "respuestas" if origen == "banco" else "respuestas_caso"
+    sb.table(tabla).upsert({
         "examen_instancia_id": instancia_id, "pregunta_id": body.pregunta_id,
         "opcion_elegida": opcion_original, "correcta": correcta,
     }).execute()
@@ -241,7 +244,9 @@ def finalizar_examen(instancia_id: str):
     if not instancia:
         raise HTTPException(404, "Examen no encontrado")
 
-    respuestas = sb.table("respuestas").select("pregunta_id, correcta").eq("examen_instancia_id", instancia_id).execute().data
+    respuestas_banco = sb.table("respuestas").select("pregunta_id, correcta").eq("examen_instancia_id", instancia_id).execute().data
+    respuestas_caso = sb.table("respuestas_caso").select("pregunta_id, correcta").eq("examen_instancia_id", instancia_id).execute().data
+    respuestas = respuestas_banco + respuestas_caso
     puntos_map = instancia["puntos_por_pregunta"]
     puntaje = sum(puntos_map[r["pregunta_id"]] for r in respuestas if r["correcta"])
     porcentaje = puntaje / 100
@@ -281,4 +286,3 @@ def registrar_salida(instancia_id: str):
         return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
 
     return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
-        
