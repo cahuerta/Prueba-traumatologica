@@ -29,7 +29,7 @@ def pagina_actual(codigo: str):
     no tiene paginas creadas)."""
     sesion = (
         sb.table("sesiones_clase")
-        .select("id, pagina_actual_orden")
+        .select("id, clase_formal_id, pagina_actual_orden")
         .eq("codigo_acceso", codigo)
         .execute()
         .data
@@ -44,7 +44,7 @@ def pagina_actual(codigo: str):
     pagina = (
         sb.table("paginas_clase")
         .select("id, titulo, tipo_herramienta, config")
-        .eq("sesion_id", sesion["id"])
+        .eq("clase_formal_id", sesion["clase_formal_id"])
         .eq("orden", sesion["pagina_actual_orden"])
         .execute()
         .data
@@ -53,4 +53,3 @@ def pagina_actual(codigo: str):
         raise HTTPException(404, "Pagina activa no encontrada")
 
     return pagina[0]
-  
