@@ -11,11 +11,15 @@ Solo es seguro porque el servicio corre con UN SOLO proceso
 escala a mas de un worker, este diseño deja de ser valido y habria que
 mover esto a un cache compartido (ej. Redis)-.
 
-Se invalida (se refresca) unicamente en 3 momentos reales:
+Se invalida (se refresca) unicamente en momentos reales:
   1. El admin ejecuta una accion (abrir_votacion, cerrar_votacion,
      revelar, siguiente) -> invalidar_sesion() / actualizar_sesion_cache().
   2. Un alumno vota -> invalidar_resultados().
   3. Alguien marca asistencia (ingreso a la sesion) -> invalidar_asistencia().
+  4. Se crea/edita/quita una pregunta de un caso -> invalidar_pregunta()
+     (tambien invalida el TOTAL de preguntas de ese caso).
+  5. Se agrega/quita un caso de una presentacion -> invalidar_posiciones_presentacion()
+     (tambien invalida el TOTAL de casos de esa presentacion).
 """
 
 # ---------------- SESION (estado, caso/pregunta actual) ----------------
@@ -82,13 +86,16 @@ def guardar_pregunta_cache(caso_id: str, orden: int, fila: dict):
 
 def invalidar_pregunta(caso_id: str, orden: int = None):
     """Se llama al crear/editar/quitar una pregunta del caso. Si no se
-    especifica orden, invalida todas las preguntas de ese caso."""
+    especifica orden, invalida todas las preguntas de ese caso.
+    Tambien invalida el TOTAL de preguntas de ese caso -cambio junto,
+    porque agregar/quitar una pregunta es justo lo que cambia ese numero."""
     if orden is None:
         for clave in list(_preguntas):
             if clave[0] == caso_id:
                 _preguntas.pop(clave, None)
     else:
         _preguntas.pop((caso_id, orden), None)
+    _total_preguntas_caso.pop(caso_id, None)
 
 
 # ---------------- CASO CLINICO (titulo, vineta, media - estatico) ----------------
@@ -119,8 +126,51 @@ def guardar_posicion_caso_cache(presentacion_id: str, orden: int, caso):
     _posicion_a_caso[(presentacion_id, orden)] = caso
 
 def invalidar_posiciones_presentacion(presentacion_id: str):
-    """Se llama al agregar/quitar un caso de una presentacion."""
+    """Se llama al agregar/quitar un caso de una presentacion. Tambien
+    invalida el TOTAL de casos de esa presentacion -mismo motivo que
+    invalidar_pregunta con el total de preguntas-."""
     for clave in list(_posicion_a_caso):
         if clave[0] == presentacion_id:
             _posicion_a_caso.pop(clave, None)
+    _total_casos_presentacion.pop(presentacion_id, None)
+
+
+# ---------------- TOTALES (cantidad de preguntas por caso / casos por presentacion) ----------------
+# Se consultan en CADA poll de CADA alumno mientras estado=='cerrada' (para
+# calcular 'finalizada'), asi que sin cache le pegan a Supabase sin
+# necesidad -son numeros que casi nunca cambian mientras la clase esta en
+# curso, solo al editar contenido desde el panel de preparacion-.
+_total_preguntas_caso: dict = {}      # caso_id -> int
+_total_casos_presentacion: dict = {}  # presentacion_id -> int
+
+def obtener_total_preguntas_cache(caso_id: str):
+    return _total_preguntas_caso.get(caso_id)
+
+def guardar_total_preguntas_cache(caso_id: str, total: int):
+    _total_preguntas_caso[caso_id] = total
+
+def obtener_total_casos_cache(presentacion_id: str):
+    return _total_casos_presentacion.get(presentacion_id)
+
+def guardar_total_casos_cache(presentacion_id: str, total: int):
+    _total_casos_presentacion[presentacion_id] = total
+
+
+# ---------------- PAGINA DEL RESUMEN FINAL ----------------
+# El admin la avanza con un boton (endpoint dedicado); Proyeccion y Admin
+# la leen en cada poll del panel para saber que pagina del resumen mostrar.
+# Vive solo en memoria -es un dato de UI efimero, no necesita sobrevivir
+# a un reinicio del servicio ni guardarse en Supabase-.
+_pagina_resumen: dict = {}   # sesion_id -> int
+
+def obtener_pagina_resumen(sesion_id: str) -> int:
+    return _pagina_resumen.get(sesion_id, 0)
+
+def avanzar_pagina_resumen(sesion_id: str) -> int:
+    nueva = obtener_pagina_resumen(sesion_id) + 1
+    _pagina_resumen[sesion_id] = nueva
+    return nueva
+
+def reiniciar_pagina_resumen(sesion_id: str):
+    _pagina_resumen.pop(sesion_id, None)
   
