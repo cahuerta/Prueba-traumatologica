@@ -73,16 +73,21 @@ def estado_actual_alumno(codigo: str):
 
     caso = pregunta["caso"]
 
-    total_preguntas = total_preguntas_caso(caso["id"])
-    total_casos = total_casos_presentacion(sesion["presentacion_id"])
-    es_ultima_pregunta = sesion["pregunta_actual_orden"] >= total_preguntas
-    es_ultimo_caso = sesion["caso_actual_orden"] >= total_casos
-    finalizada = sesion["estado"] == "cerrada" and es_ultima_pregunta and es_ultimo_caso
+    total_preguntas = None
+    total_casos = None
+    finalizada = False
+    if sesion["estado"] == "cerrada":
+        total_preguntas = total_preguntas_caso(caso["id"])
+        total_casos = total_casos_presentacion(sesion["presentacion_id"])
+        es_ultima_pregunta = sesion["pregunta_actual_orden"] >= total_preguntas
+        es_ultimo_caso = sesion["caso_actual_orden"] >= total_casos
+        finalizada = es_ultima_pregunta and es_ultimo_caso
 
     salida = {
         "estado": sesion["estado"],
         "sesion_id": sesion["id"],
         "finalizada": finalizada,
+        "pagina_resumen": cache_vivo.obtener_pagina_resumen(sesion["id"]),
         "caso": {
             "titulo": caso["titulo"],
             "vineta_clinica": caso["vineta_clinica"],
