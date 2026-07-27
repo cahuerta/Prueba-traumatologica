@@ -455,6 +455,57 @@ def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_inter
     ]
 
 
+@router.get("/vivo/{sesion_id}/resumen")
+def resumen_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Resumen final de la sesion: % de aciertos por caso, calculado
+    cruzando votos_vivo (ya volcados a Supabase al cerrar cada
+    votacion) con la respuesta correcta de cada pregunta. Se llama al
+    terminar la presentacion -tanto Admin como Proyeccion piden lo
+    mismo aqui, cada uno lo muestra a su manera-."""
+    votos = sb.table("votos_vivo").select("pregunta_id, opcion").eq("sesion_id", sesion_id).execute().data
+    if not votos:
+        return {"casos": [], "porcentaje_global": 0}
+
+    pregunta_ids = list({v["pregunta_id"] for v in votos})
+    preguntas_info = sb.table("caso_preguntas").select(
+        "id, caso_id, correcta"
+    ).in_("id", pregunta_ids).execute().data
+    info_por_pregunta = {p["id"]: p for p in preguntas_info}
+
+    caso_ids = list({p["caso_id"] for p in preguntas_info})
+    casos_info = sb.table("casos_clinicos").select("id, titulo").in_("id", caso_ids).execute().data
+    titulo_por_caso = {c["id"]: c["titulo"] for c in casos_info}
+
+    agregados: dict = {}
+    for v in votos:
+        info = info_por_pregunta.get(v["pregunta_id"])
+        if not info:
+            continue
+        caso_id = info["caso_id"]
+        if caso_id not in agregados:
+            agregados[caso_id] = {"total": 0, "correctos": 0}
+        agregados[caso_id]["total"] += 1
+        if v["opcion"] == info["correcta"]:
+            agregados[caso_id]["correctos"] += 1
+
+    casos_resumen = []
+    total_global = 0
+    correctos_global = 0
+    for caso_id, datos in agregados.items():
+        total_global += datos["total"]
+        correctos_global += datos["correctos"]
+        porcentaje = round(datos["correctos"] / datos["total"] * 100, 1) if datos["total"] else 0
+        casos_resumen.append({
+            "caso_id": caso_id,
+            "titulo": titulo_por_caso.get(caso_id, ""),
+            "porcentaje_aciertos": porcentaje,
+        })
+
+    porcentaje_global = round(correctos_global / total_global * 100, 1) if total_global else 0
+
+    return {"casos": casos_resumen, "porcentaje_global": porcentaje_global}
+
+
 @router.post("/vivo/{sesion_id}/accion")
 def avanzar_sesion(sesion_id: str, body: AccionIn, interrogador: dict = Depends(get_current_interrogador)):
     """El profesor controla el ciclo: mostrar_caso -> abrir_votacion -> cerrar_votacion (discusion) -> revelar -> siguiente.
