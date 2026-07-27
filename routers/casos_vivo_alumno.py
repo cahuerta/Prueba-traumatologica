@@ -17,6 +17,8 @@ from routers.casos_vivo_comun import (
     obtener_sesion,
     obtener_sesion_por_codigo,
     pregunta_actual,
+    total_preguntas_caso,
+    total_casos_presentacion,
     url_firmada_media,
 )
 
@@ -53,18 +55,34 @@ def estado_actual_alumno(codigo: str):
     (titulo + vineta + su media) y la pregunta activa -con su propia
     media independiente, ej. una radiografia distinta por pregunta-.
     No expone la respuesta correcta ni la explicacion salvo que el
-    estado sea 'cerrada'."""
+    estado sea 'cerrada'.
+
+    'finalizada' avisa cuando esta pregunta era la ultima del ultimo
+    caso Y ya esta revelada -sin este campo, Proyeccion (que solo hace
+    polling de este endpoint, sin recibir nunca la respuesta directa
+    del click "siguiente" que ve Admin) no tiene forma de distinguir
+    "se acaba de revelar esta pregunta" de "esto fue lo ultimo de
+    toda la presentacion": ambos casos devuelven exactamente los
+    mismos campos, porque caso_actual_orden/pregunta_actual_orden no
+    cambian despues del ultimo 'siguiente'."""
     sesion = obtener_sesion_por_codigo(codigo)
 
     pregunta = pregunta_actual(sesion)
     if not pregunta:
-        return {"estado": sesion["estado"], "caso": None, "pregunta": None}
+        return {"estado": sesion["estado"], "caso": None, "pregunta": None, "finalizada": False}
 
     caso = pregunta["caso"]
+
+    total_preguntas = total_preguntas_caso(caso["id"])
+    total_casos = total_casos_presentacion(sesion["presentacion_id"])
+    es_ultima_pregunta = sesion["pregunta_actual_orden"] >= total_preguntas
+    es_ultimo_caso = sesion["caso_actual_orden"] >= total_casos
+    finalizada = sesion["estado"] == "cerrada" and es_ultima_pregunta and es_ultimo_caso
 
     salida = {
         "estado": sesion["estado"],
         "sesion_id": sesion["id"],
+        "finalizada": finalizada,
         "caso": {
             "titulo": caso["titulo"],
             "vineta_clinica": caso["vineta_clinica"],
@@ -123,3 +141,4 @@ def resultados_agregados(sesion_id: str):
         return {"total": 0, "conteo": {}}
 
     return votos_local.obtener_resultados(sesion_id, pregunta["id"])
+    
