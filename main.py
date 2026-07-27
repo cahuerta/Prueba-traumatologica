@@ -21,6 +21,7 @@ from routers import (
     alumnos,
     clases_formales_sesiones,
     clases_formales_paginas,
+    clases_formales_contenido,
     clases_formales_preguntas,
     clases_formales_semaforo,
     clases_formales_actual,
@@ -53,6 +54,7 @@ app.include_router(alumnos.router)
 # ---------------- Clases Formales (rama nueva, separada de casos_vivo) ----------------
 app.include_router(clases_formales_sesiones.router)
 app.include_router(clases_formales_paginas.router)
+app.include_router(clases_formales_contenido.router)
 app.include_router(clases_formales_preguntas.router)
 app.include_router(clases_formales_semaforo.router)
 app.include_router(clases_formales_actual.router)
@@ -62,4 +64,3 @@ app.include_router(sesion_resolver.router)
 @app.on_event("startup")
 def startup():
     inicializar_schema()
-    
