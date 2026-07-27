@@ -39,8 +39,25 @@ class SesionIn(BaseModel):
 def _generar_codigo_acceso() -> str:
     """Codigo corto tipo el que ya usan las sesiones de casos clinicos
     -letras mayusculas y numeros, facil de mostrar en QR y de teclear
-    manualmente si hace falta-."""
+    manualmente si hace falta-.
+
+    Con 6 caracteres (26 letras + 10 digitos) hay ~2.176 millones de
+    combinaciones posibles -la probabilidad de choque en un uso normal
+    es baja, pero no cero-, asi que se verifica contra la tabla antes
+    de aceptarlo y se reintenta si ya existe (ver crear_sesion)."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
+def _generar_codigo_unico() -> str:
+    """Reintenta hasta encontrar un codigo que no exista todavia en
+    sesiones_clase. En la practica casi siempre acierta al primer
+    intento -el reintento es solo la red de seguridad-."""
+    for _ in range(10):
+        codigo = _generar_codigo_acceso()
+        existe = sb.table("sesiones_clase").select("id").eq("codigo_acceso", codigo).execute().data
+        if not existe:
+            return codigo
+    raise HTTPException(500, "No se pudo generar un codigo de acceso unico, intente de nuevo")
 
 
 # ---------------- ENDPOINTS ----------------
@@ -48,7 +65,7 @@ def _generar_codigo_acceso() -> str:
 def crear_sesion(body: SesionIn, interrogador: dict = Depends(get_current_interrogador)):
     """Crea una sesion nueva de Clases Formales, en estado 'preparacion'
     -el interrogador arma sus paginas antes de activarla-."""
-    codigo = _generar_codigo_acceso()
+    codigo = _generar_codigo_unico()
 
     res = sb.table("sesiones_clase").insert({
         "nombre": body.nombre.strip(),
