@@ -1,24 +1,39 @@
 """
 routers/clases_formales_sesiones.py
-Ciclo de creacion de una sesion de Clases Formales -tabla separada de
-sesiones_vivo (casos clinicos), por la misma decision de "duplicar en
-vez de compartir" que se aplico a paginas_clase, preguntas_anonimas,
-etc-. Cero riesgo de tocar lo que ya funciona en produccion.
+Sesion EN VIVO de Clases Formales -tabla separada de sesiones_vivo
+(casos clinicos), por la misma decision de "duplicar en vez de
+compartir" que se aplico a paginas_clase, preguntas_anonimas, etc-.
+Cero riesgo de tocar lo que ya funciona en produccion.
 
-Esta es la fila que el supraselector (a definir, tambien backend) usara
-para decidir hacia donde mandar una sesion activa: si el codigo_acceso
-existe en sesiones_vivo -> caso clinico. Si existe en sesiones_clase ->
-Clases Formales.
+Iniciar una sesion NO crea contenido: se elige un clase_formal_id ya
+armado de antemano (routers/clases_formales_contenido.py, con sus
+paginas ya construidas en clases_formales_paginas.py) -mismo patron
+que casos clinicos, donde "iniciar presentacion" elige una presentacion
+ya armada en vez de crear casos sobre la marcha-.
+
+La sesion nace directamente ACTIVA -sin estado intermedio de
+"preparacion"-: como el contenido ya existe de antemano, no hay nada
+que esperar entre crear la sesion y que el alumno pueda entrar. Solo
+dos estados posibles: "activa" | "cerrada".
+
+Esta es la fila que el supraselector (routers/sesion_resolver.py) usa
+para decidir hacia donde mandar un codigo activo: si existe en
+sesiones_vivo -> caso clinico. Si existe en sesiones_clase -> Clases
+Formales.
 
 Tabla usada: sesiones_clase (a crear al final, junto con el resto del
 esquema de Clases Formales).
   id                  uuid
-  nombre              text
-  codigo_acceso       text (unico, corto, lo usan alumnos para entrar via QR/link)
-  estado              text  ("preparacion" | "activa" | "cerrada")
-  pagina_actual_orden float (null hasta que se activa; posicion en la
-                       secuencia de paginas_clase.orden que admin/proyeccion
-                       estan mostrando en este momento)
+  clase_formal_id     uuid  (FK a clases_formales, el contenido elegido)
+  nombre              text  (copiado del contenido al iniciar, por si el
+                       contenido se edita/renombra despues -la sesion ya
+                       dictada mantiene el nombre que tenia ese dia)
+  codigo_acceso       text  (unico, corto, lo usan alumnos para entrar via QR/link)
+  estado              text  ("activa" | "cerrada")
+  pagina_actual_orden float (fijada en la primera pagina del contenido
+                       al iniciar; posicion en la secuencia de
+                       paginas_clase.orden que admin/proyeccion estan
+                       mostrando en este momento)
   created_at          timestamptz
 
 Avance de pagina: estrictamente secuencial, solo hacia adelante -una
@@ -45,7 +60,7 @@ router = APIRouter(prefix="/clases-formales/sesiones", tags=["clases-formales-se
 
 # ---------------- MODELOS ----------------
 class SesionIn(BaseModel):
-    nombre: str
+    clase_formal_id: str
 
 
 # ---------------- HELPER ----------------
@@ -57,7 +72,7 @@ def _generar_codigo_acceso() -> str:
     Con 6 caracteres (26 letras + 10 digitos) hay ~2.176 millones de
     combinaciones posibles -la probabilidad de choque en un uso normal
     es baja, pero no cero-, asi que se verifica contra la tabla antes
-    de aceptarlo y se reintenta si ya existe (ver crear_sesion)."""
+    de aceptarlo y se reintenta si ya existe (ver iniciar_sesion)."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
@@ -75,15 +90,35 @@ def _generar_codigo_unico() -> str:
 
 # ---------------- ENDPOINTS ----------------
 @router.post("")
-def crear_sesion(body: SesionIn, interrogador: dict = Depends(get_current_interrogador)):
-    """Crea una sesion nueva de Clases Formales, en estado 'preparacion'
-    -el interrogador arma sus paginas antes de activarla-."""
+def iniciar_sesion(body: SesionIn, interrogador: dict = Depends(get_current_interrogador)):
+    """Inicia una sesion en vivo a partir de un contenido ya armado.
+    Nace 'activa' de inmediato, con la primera pagina del contenido ya
+    fijada como pagina_actual_orden -el contenido ya existe, no hay
+    nada que esperar-."""
+    contenido = sb.table("clases_formales").select("nombre").eq("id", body.clase_formal_id).execute().data
+    if not contenido:
+        raise HTTPException(404, "Contenido no encontrado")
+
+    primera = (
+        sb.table("paginas_clase")
+        .select("orden")
+        .eq("clase_formal_id", body.clase_formal_id)
+        .order("orden")
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not primera:
+        raise HTTPException(400, "El contenido no tiene paginas todavia, agrega al menos una antes de iniciar")
+
     codigo = _generar_codigo_unico()
 
     res = sb.table("sesiones_clase").insert({
-        "nombre": body.nombre.strip(),
+        "clase_formal_id": body.clase_formal_id,
+        "nombre": contenido[0]["nombre"],
         "codigo_acceso": codigo,
-        "estado": "preparacion",
+        "estado": "activa",
+        "pagina_actual_orden": primera[0]["orden"],
     }).execute()
 
     return res.data[0]
@@ -91,7 +126,8 @@ def crear_sesion(body: SesionIn, interrogador: dict = Depends(get_current_interr
 
 @router.get("")
 def listar_sesiones(interrogador: dict = Depends(get_current_interrogador)):
-    """Lista todas las sesiones de Clases Formales, mas recientes primero."""
+    """Lista todas las sesiones en vivo (activas e historicas), mas
+    recientes primero."""
     return (
         sb.table("sesiones_clase")
         .select("*")
@@ -99,32 +135,6 @@ def listar_sesiones(interrogador: dict = Depends(get_current_interrogador)):
         .execute()
         .data
     )
-
-
-@router.patch("/{sesion_id}/activar")
-def activar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Pasa la sesion a estado 'activa' -recien ahi los alumnos pueden
-    entrar con el codigo de acceso y empezar a interactuar-. Ademas fija
-    pagina_actual_orden en la primera pagina de la secuencia -la clase
-    siempre arranca desde el principio-."""
-    primera = (
-        sb.table("paginas_clase")
-        .select("orden")
-        .eq("sesion_id", sesion_id)
-        .order("orden")
-        .limit(1)
-        .execute()
-        .data
-    )
-    cambios = {"estado": "activa"}
-    if primera:
-        cambios["pagina_actual_orden"] = primera[0]["orden"]
-
-    res = sb.table("sesiones_clase").update(cambios).eq("id", sesion_id).execute()
-    if not res.data:
-        raise HTTPException(404, "Sesion no encontrada")
-
-    return res.data[0]
 
 
 @router.patch("/{sesion_id}/avanzar")
@@ -140,7 +150,7 @@ def avanzar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inte
     siguiente = (
         sb.table("paginas_clase")
         .select("orden")
-        .eq("sesion_id", sesion_id)
+        .eq("clase_formal_id", sesion["clase_formal_id"])
         .gt("orden", sesion["pagina_actual_orden"])
         .order("orden")
         .limit(1)
@@ -167,4 +177,3 @@ def cerrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inter
         raise HTTPException(404, "Sesion no encontrada")
 
     return res.data[0]
-  
