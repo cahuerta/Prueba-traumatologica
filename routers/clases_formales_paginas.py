@@ -1,9 +1,16 @@
 """
 routers/clases_formales_paginas.py
-Constructor de sesion para Clases Formales: el interrogador arma su
+Constructor de CONTENIDO para Clases Formales: el interrogador arma una
 clase como paginas secuenciales, cada una con un titulo y opcionalmente
 una herramienta (ej. "semaforo", "espectro", o "ninguna" si es solo
 contenido/exposicion).
+
+El contenido es independiente de cuando se dicta -se arma una vez, se
+puede editar y se reutiliza en distintas fechas/cursos-, igual que una
+"presentacion" de casos clinicos: no vive dentro de una sesion en vivo,
+vive dentro de un registro de clases_formales (routers/clases_formales_contenido.py).
+Iniciar una sesion en vivo (clases_formales_sesiones.py) simplemente
+elige un clase_formal_id ya armado.
 
 Modulo de creacion, exclusivo del interrogador -no hay acceso publico
 aca, a diferencia de clases_formales_preguntas.py-.
@@ -24,13 +31,13 @@ cambios aca-.
 
 Tabla usada: paginas_clase (nombre y columnas a crear al final, junto
 con el resto del esquema de Clases Formales).
-  id              uuid
-  sesion_id       uuid
-  orden           float
-  titulo          text
-  tipo_herramienta text   ("ninguna" | "semaforo" | "espectro" | ...)
-  config          jsonb
-  created_at      timestamptz
+  id                uuid
+  clase_formal_id   uuid  (FK a clases_formales, el contenido -no a la sesion en vivo-)
+  orden             float
+  titulo            text
+  tipo_herramienta  text   ("ninguna" | "semaforo" | "espectro" | ...)
+  config            jsonb
+  created_at        timestamptz
 """
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -45,7 +52,7 @@ SALTO_ORDEN = 10
 
 # ---------------- MODELOS ----------------
 class PaginaIn(BaseModel):
-    sesion_id: str
+    clase_formal_id: str
     titulo: str
     tipo_herramienta: str = "ninguna"
     config: dict = {}
@@ -65,13 +72,13 @@ class MoverIn(BaseModel):
 # ---------------- ENDPOINTS ----------------
 @router.post("")
 def crear_pagina(body: PaginaIn, interrogador: dict = Depends(get_current_interrogador)):
-    """Crea una pagina nueva al final de la secuencia de la sesion
+    """Crea una pagina nueva al final de la secuencia del contenido
     -orden = ultima pagina existente + SALTO_ORDEN, o SALTO_ORDEN si es
     la primera-."""
     ultima = (
         sb.table("paginas_clase")
         .select("orden")
-        .eq("sesion_id", body.sesion_id)
+        .eq("clase_formal_id", body.clase_formal_id)
         .order("orden", desc=True)
         .limit(1)
         .execute()
@@ -80,7 +87,7 @@ def crear_pagina(body: PaginaIn, interrogador: dict = Depends(get_current_interr
     nuevo_orden = (ultima[0]["orden"] + SALTO_ORDEN) if ultima else SALTO_ORDEN
 
     res = sb.table("paginas_clase").insert({
-        "sesion_id": body.sesion_id,
+        "clase_formal_id": body.clase_formal_id,
         "orden": nuevo_orden,
         "titulo": body.titulo.strip(),
         "tipo_herramienta": body.tipo_herramienta,
@@ -90,13 +97,13 @@ def crear_pagina(body: PaginaIn, interrogador: dict = Depends(get_current_interr
     return res.data[0]
 
 
-@router.get("/{sesion_id}")
-def listar_paginas(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Lista las paginas de la sesion en su orden de presentacion."""
+@router.get("/{clase_formal_id}")
+def listar_paginas(clase_formal_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Lista las paginas del contenido en su orden de presentacion."""
     return (
         sb.table("paginas_clase")
         .select("*")
-        .eq("sesion_id", sesion_id)
+        .eq("clase_formal_id", clase_formal_id)
         .order("orden")
         .execute()
         .data
@@ -158,4 +165,3 @@ def eliminar_pagina(pagina_id: str, interrogador: dict = Depends(get_current_int
         raise HTTPException(404, "Pagina no encontrada")
 
     return {"ok": True}
-  
