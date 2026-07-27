@@ -20,7 +20,11 @@ Se invalida (se refresca) unicamente en momentos reales:
      (tambien invalida el TOTAL de preguntas de ese caso).
   5. Se agrega/quita un caso de una presentacion -> invalidar_posiciones_presentacion()
      (tambien invalida el TOTAL de casos de esa presentacion).
+  6. Las URL firmadas de media NO se invalidan por accion del admin -se
+     vencen solas, respetando su propio tiempo de validez (ver mas abajo).
 """
+
+import time
 
 # ---------------- SESION (estado, caso/pregunta actual) ----------------
 _sesiones: dict = {}          # sesion_id -> fila de sesiones_vivo
@@ -173,4 +177,35 @@ def avanzar_pagina_resumen(sesion_id: str) -> int:
 
 def reiniciar_pagina_resumen(sesion_id: str):
     _pagina_resumen.pop(sesion_id, None)
+
+
+# ---------------- URL FIRMADA DE MEDIA (bucket privado, con vencimiento real) ----------------
+# Esta era la pieza que faltaba: url_firmada_media() nunca pasaba por cache,
+# asi que cada poll de cada alumno (con imagen en la pregunta) le pedia a
+# Supabase Storage una URL firmada NUEVA para el MISMO archivo -bloqueante,
+# sincrono, y el que mas gatillaba el bug de concurrencia HTTP/2 (visto en
+# los logs: RemoteProtocolError "Server disconnected" justo en esta linea).
+#
+# Cachear no significa ignorar el vencimiento: la URL sigue caducando de
+# verdad (eso lo protege Supabase, no nosotros). Lo que se evita es pedir
+# una URL nueva para el MISMO archivo mientras la anterior sigue vigente
+# -se guarda junto con el momento exacto en que caduca, con un margen de
+# seguridad para no entregar una URL a punto de vencer-.
+_media_firmada: dict = {}   # (bucket, storage_path) -> {"url": str, "vence_en": epoch float}
+
+def obtener_media_firmada_cache(bucket: str, storage_path: str):
+    entrada = _media_firmada.get((bucket, storage_path))
+    if not entrada:
+        return None
+    if time.time() >= entrada["vence_en"]:
+        _media_firmada.pop((bucket, storage_path), None)
+        return None
+    return entrada["url"]
+
+def guardar_media_firmada_cache(bucket: str, storage_path: str, url: str, segundos_validez: int):
+    margen = min(30, segundos_validez // 10)
+    _media_firmada[(bucket, storage_path)] = {
+        "url": url,
+        "vence_en": time.time() + segundos_validez - margen,
+}
   
