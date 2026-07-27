@@ -149,12 +149,24 @@ def pregunta_actual(sesion: dict) -> Optional[dict]:
     return {"caso": caso, **filas[0]}
 
 def total_preguntas_caso(caso_id: str) -> int:
+    cacheado = cache_vivo.obtener_total_preguntas_cache(caso_id)
+    if cacheado is not None:
+        return cacheado
+
     filas = sb.table("caso_preguntas").select("id").eq("caso_id", caso_id).execute().data
-    return len(filas)
+    total = len(filas)
+    cache_vivo.guardar_total_preguntas_cache(caso_id, total)
+    return total
 
 def total_casos_presentacion(presentacion_id: str) -> int:
+    cacheado = cache_vivo.obtener_total_casos_cache(presentacion_id)
+    if cacheado is not None:
+        return cacheado
+
     filas = sb.table("presentacion_casos").select("id").eq("presentacion_id", presentacion_id).execute().data
-    return len(filas)
+    total = len(filas)
+    cache_vivo.guardar_total_casos_cache(presentacion_id, total)
+    return total
 
 def url_firmada_media(bucket: str, storage_path: Optional[str], segundos: int = 300) -> Optional[str]:
     """Genera una URL firmada temporal para un archivo en un bucket privado.
