@@ -1,14 +1,15 @@
 """
 routers/clases_formales_semaforo.py
-Herramienta "semaforo" de una pagina de Clases Formales: el alumno
-responde una pregunta binaria ("sigo?" si/no), el interrogador ve el
-resultado agregado en vivo (color verde/amarillo/rojo segun % de "si").
+Herramienta "semaforo" de Clases Formales: el alumno responde una
+pregunta binaria ("sigo?" si/no), el interrogador ve el resultado
+agregado en vivo (color verde/amarillo/rojo segun % de "si").
+
+Continuo por SESION completa -no por pagina-: el alumno responde una
+sola vez y su respuesta se mantiene vigente durante toda la clase, sin
+reiniciarse al cambiar de pagina.
 
 Sin persistencia -ni disco ni Supabase-: es una lectura del momento,
-vive solo en memoria (services/cache_clases_formales.py). El alumno
-puede cambiar su respuesta en cualquier momento mientras la pagina esta
-activa. Cada pagina tiene su propio espacio en memoria por pagina_id,
-no requiere ningun reinicio explicito al cambiar de pagina.
+vive solo en memoria (services/cache_clases_formales.py).
 
 El alumno NO tiene login propio -mismo patron que preguntas y votos-:
 valida su RUT contra el conjunto activo en cada request.
@@ -50,20 +51,20 @@ def _validar_alumno(rut: str) -> str:
 
 
 # ---------------- ENDPOINT PUBLICO (alumno) ----------------
-@router.post("/{pagina_id}/responder")
-def responder(pagina_id: str, body: ResponderIn):
-    """El alumno responde (o cambia) su estado para esta pagina."""
+@router.post("/{sesion_id}/responder")
+def responder(sesion_id: str, body: ResponderIn):
+    """El alumno responde (o cambia) su estado para la sesion completa."""
     alumno_id = _validar_alumno(body.rut)
-    responder_semaforo(pagina_id, alumno_id, body.sigo)
+    responder_semaforo(sesion_id, alumno_id, body.sigo)
 
     return {"ok": True}
 
 
 # ---------------- ENDPOINT DEL INTERROGADOR ----------------
-@router.get("/{pagina_id}/resultado")
-def resultado(pagina_id: str, interrogador: dict = Depends(get_current_interrogador)):
+@router.get("/{sesion_id}/resultado")
+def resultado(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Resultado agregado en vivo para la proyeccion/panel del
     interrogador: total de respuestas, % que dijo 'si', y el color
     correspondiente. Sin identidad de alumno."""
-    return obtener_resultado_semaforo(pagina_id)
-  
+    return obtener_resultado_semaforo(sesion_id)
+    
