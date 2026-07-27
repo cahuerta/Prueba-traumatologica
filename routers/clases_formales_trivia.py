@@ -8,11 +8,12 @@ pregunta ni las alternativas, su pantalla no depende de la pagina
 actual-. El interrogador ve el conteo en vivo y decide cuando revelar.
 
 Efimero -igual que el semaforo, nunca se persiste a disco ni a
-Supabase-. A diferencia del semaforo (continuo, nunca se limpia), la
-trivia necesita reinicio EXPLICITO del admin antes de cada pregunta
-nueva, porque el alumno no sabe en que pagina va la clase y su voto
-siempre llega al mismo lugar (la sesion) sin importar que trivia este
-activa.
+Supabase-. Aislado por PAGINA (pagina_id) -a diferencia del semaforo,
+que es continuo por sesion completa-: cada pregunta de trivia es
+especifica de su pagina, no tiene sentido que se mezcle con la trivia
+de otra. Por estar aislada por pagina, no necesita reinicio explicito
+del admin -cada pagina nueva ya empieza vacia sola, imposible que se
+mezcle con la trivia de otra pagina.
 
 Sin identidad de alumno en los resultados -mismo criterio que preguntas
 y semaforo-. El alumno NO tiene login propio: valida su RUT contra el
@@ -25,10 +26,10 @@ from pydantic import BaseModel
 from routers.auth import sb, get_current_interrogador
 from routers.conjuntos_comun import obtener_conjunto_activo_id
 from services.cache_trivia_clases_formales import (
-    iniciar_trivia,
     responder_trivia,
     obtener_resultado_trivia,
     revelar_trivia,
+    obtener_mi_resultado,
 )
 
 router = APIRouter(prefix="/clases-formales/trivia", tags=["clases-formales-trivia"])
@@ -62,42 +63,42 @@ def _validar_alumno(rut: str) -> str:
 
 
 # ---------------- ENDPOINTS DEL INTERROGADOR ----------------
-@router.patch("/{sesion_id}/iniciar")
-def iniciar(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Reinicia el conteo -a usar justo antes de pedirle a la sala que
-    vote la pregunta de la pagina actual. Limpia cualquier voto que
-    haya quedado de una trivia anterior en la misma sesion."""
-    iniciar_trivia(sesion_id)
-    return {"ok": True}
-
-
-@router.get("/{sesion_id}/resultado")
-def resultado(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+@router.get("/{pagina_id}/resultado")
+def resultado(pagina_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Conteo en vivo por letra, total de respuestas, y si ya se
     revelo. Sin identidad de alumno."""
-    return obtener_resultado_trivia(sesion_id)
+    return obtener_resultado_trivia(pagina_id)
 
 
-@router.patch("/{sesion_id}/revelar")
-def revelar(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Marca la trivia actual como revelada -desde aca la proyeccion
-    puede mostrar la letra correcta junto al conteo."""
-    revelar_trivia(sesion_id)
+@router.patch("/{pagina_id}/revelar")
+def revelar(pagina_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Marca la trivia de esta pagina como revelada -desde aca la
+    proyeccion puede mostrar la letra correcta junto al conteo, y el
+    alumno puede consultar si acerto."""
+    revelar_trivia(pagina_id)
     return {"ok": True}
 
 
-# ---------------- ENDPOINT PUBLICO (alumno) ----------------
-@router.post("/{sesion_id}/responder")
-def responder(sesion_id: str, body: ResponderIn):
+# ---------------- ENDPOINTS PUBLICOS (alumno) ----------------
+@router.post("/{pagina_id}/responder")
+def responder(pagina_id: str, body: ResponderIn):
     """El alumno responde con su letra, desde el selector fijo -sin
-    saber a que pregunta corresponde. Si vota antes de que el admin
-    inicie la trivia, el voto igual se registra (queda vigente para la
-    proxima vez que se inicie)."""
+    saber a que pregunta corresponde."""
     letra = body.letra.strip().upper()
     if letra not in LETRAS_VALIDAS:
         raise HTTPException(400, "Letra invalida, debe ser A-E")
 
     alumno_id = _validar_alumno(body.rut)
-    responder_trivia(sesion_id, alumno_id, letra)
+    responder_trivia(pagina_id, alumno_id, letra)
 
     return {"ok": True}
+
+
+@router.get("/{pagina_id}/mi-respuesta")
+def mi_respuesta(pagina_id: str, rut: str):
+    """La letra que el propio alumno respondio -para que sepa que
+    contesto una vez que se revela. No compara contra la correcta, eso
+    lo hace el frontend con el config de la pagina."""
+    alumno_id = _validar_alumno(rut)
+    return {"letra": obtener_mi_resultado(pagina_id, alumno_id)}
+    
