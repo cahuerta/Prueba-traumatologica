@@ -425,7 +425,6 @@ def ver_asistencia_vivo(sesion_id: str, interrogador: dict = Depends(get_current
     cache_vivo.guardar_asistencia_cache(sesion_id, resultado)
     return resultado
 
-
 @router.get("/vivo/{sesion_id}/detalle")
 def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Panel del profesor: nombre -> opcion, para elegir a quien pedir fundamento oral.
@@ -453,6 +452,16 @@ def detalle_votos(sesion_id: str, interrogador: dict = Depends(get_current_inter
         }
         for v in votos_locales
     ]
+
+
+@router.post("/vivo/{sesion_id}/resumen/avanzar")
+def avanzar_resumen(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """El admin toca 'Siguiente' en la pantalla de conclusiones. Guarda
+    la pagina en cache_vivo (no en Supabase, es un dato de UI efimero) -
+    tanto Admin como Proyeccion la leen en cada poll del panel para
+    saber que pagina del resumen mostrar."""
+    nueva_pagina = cache_vivo.avanzar_pagina_resumen(sesion_id)
+    return {"pagina_resumen": nueva_pagina}
 
 
 @router.get("/vivo/{sesion_id}/resumen")
