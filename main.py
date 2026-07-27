@@ -24,6 +24,7 @@ from routers import (
     clases_formales_contenido,
     clases_formales_preguntas,
     clases_formales_semaforo,
+    clases_formales_trivia,
     clases_formales_actual,
     sesion_resolver,
 )
@@ -57,6 +58,7 @@ app.include_router(clases_formales_paginas.router)
 app.include_router(clases_formales_contenido.router)
 app.include_router(clases_formales_preguntas.router)
 app.include_router(clases_formales_semaforo.router)
+app.include_router(clases_formales_trivia.router)
 app.include_router(clases_formales_actual.router)
 app.include_router(sesion_resolver.router)
 
