@@ -168,11 +168,27 @@ def total_casos_presentacion(presentacion_id: str) -> int:
     cache_vivo.guardar_total_casos_cache(presentacion_id, total)
     return total
 
-def url_firmada_media(bucket: str, storage_path: Optional[str], segundos: int = 300) -> Optional[str]:
+def url_firmada_media(bucket: str, storage_path: Optional[str], segundos: int = 1800) -> Optional[str]:
     """Genera una URL firmada temporal para un archivo en un bucket privado.
-    Devuelve None si no hay storage_path (pregunta/caso sin foto/video)."""
+    Devuelve None si no hay storage_path (pregunta/caso sin foto/video).
+
+    Pasa primero por cache_vivo: sin esto, cada poll de cada alumno con
+    imagen en la pregunta le pedia a Supabase Storage una URL NUEVA para
+    el MISMO archivo -bloqueante y sincrono-, siendo el principal
+    gatillante del bug de concurrencia HTTP/2 bajo carga (visto en los
+    logs de Render: RemoteProtocolError "Server disconnected" justo en
+    esta funcion). La cache respeta el vencimiento real de la URL, no lo
+    ignora -30 minutos por defecto (antes 300s=5min, muy corto para una
+    pregunta que puede quedar varios minutos en discusion)."""
     if not storage_path:
         return None
+
+    cacheada = cache_vivo.obtener_media_firmada_cache(bucket, storage_path)
+    if cacheada is not None:
+        return cacheada
+
     firmada = sb.storage.from_(bucket).create_signed_url(storage_path, segundos)
-    return firmada.get("signedURL") or firmada.get("signed_url")
-    
+    url = firmada.get("signedURL") or firmada.get("signed_url")
+    if url:
+        cache_vivo.guardar_media_firmada_cache(bucket, storage_path, url, segundos)
+    return url
