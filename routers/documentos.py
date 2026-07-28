@@ -1,13 +1,20 @@
 """
 routers/documentos.py
-Tres funciones:
+Cuatro funciones:
 
-1. POST /documentos/buscar   → proxy server-to-server hacia /search de EvidenciaMed
-2. POST /documentos/generar  → proxy server-to-server hacia /generate/document de EvidenciaMed
-3. POST /documentos/pdf      → renderiza el texto YA EDITADO por el interrogador
-                                a PDF. No llama a EvidenciaMed ni a Claude —
-                                es solo formateo, con lo que el interrogador
-                                ya corrigió/agregó en pantalla.
+1. POST /documentos/buscar        → proxy server-to-server hacia /search de EvidenciaMed
+2. POST /documentos/generar       → proxy server-to-server hacia /generate/document de EvidenciaMed
+3. POST /documentos/pdf           → renderiza el texto YA EDITADO por el interrogador
+                                     a PDF. No llama a EvidenciaMed ni a Claude —
+                                     es solo formateo, con lo que el interrogador
+                                     ya corrigió/agregó en pantalla.
+4. POST /documentos/ppt           → mismo texto editado, resumido con Claude (regla 6x6)
+                                     y exportado como .pptx descargable.
+5. POST /documentos/clase-formal  → mismo texto editado, mismo resumen 6x6, pero en vez
+                                     de un .pptx descargable, crea el contenido directo
+                                     en Clases Formales (clases_formales + paginas_clase),
+                                     listo para abrir en el constructor y agregarle
+                                     imagenes/trivia/semaforo.
 
 Variables de entorno esperadas (Render, backend Músculo):
   EVIDENCIAMED_URL       (ej: https://evidenciamed-api.onrender.com)
@@ -283,6 +290,59 @@ async def _construir_ppt(doc: "DocumentoEditadoIn") -> bytes:
     return buffer.read()
 
 
+async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
+    """Mismo resumen 6x6 que _construir_ppt, pero en vez de dibujar slides
+    en un .pptx, crea el contenido directo en Clases Formales:
+    1 fila en clases_formales (nombre = titulo del documento) + 1 fila en
+    paginas_clase por cada slide resuelta -titulo (tipo_herramienta
+    'titulo') y una por cada bloque de bullets (tipo_herramienta
+    'titulo_texto', bullets guardados tal cual en config, mismo array que
+    ya usa _agregar_slide_bullets-. No se sube ninguna imagen aca -eso se
+    agrega despues a mano en el constructor-."""
+    contenido = sb.table("clases_formales").insert({"nombre": doc.titulo}).execute()
+    clase_formal_id = contenido.data[0]["id"]
+
+    orden = 1.0
+
+    sb.table("paginas_clase").insert({
+        "clase_formal_id": clase_formal_id,
+        "orden": orden,
+        "titulo": doc.titulo,
+        "tipo_herramienta": "titulo",
+        "config": {},
+    }).execute()
+    orden += 1.0
+
+    epi = doc.epidemiologia or EpidemiologiaIn()
+    epi_texto = f"Internacional: {epi.internacional or '—'}\nNacional: {epi.nacional or '—'}"
+
+    secciones_a_resumir = [("Epidemiología internacional y nacional", epi_texto)]
+    secciones_a_resumir += [(label, getattr(doc, key)) for key, label in SECCIONES_PPT]
+    if doc.referencias:
+        secciones_a_resumir.append(("Referencias", "\n".join(doc.referencias)))
+
+    # Resume TODAS las secciones en paralelo (no secuencial), igual que el PPT
+    resultados = await asyncio.gather(*(_resumir_seccion(titulo, texto) for titulo, texto in secciones_a_resumir))
+
+    filas_paginas = []
+    for (titulo, _texto), slides_bullets in zip(secciones_a_resumir, resultados):
+        for i, bullets in enumerate(slides_bullets):
+            titulo_mostrado = f"{titulo} (cont.)" if i > 0 else titulo
+            filas_paginas.append({
+                "clase_formal_id": clase_formal_id,
+                "orden": orden,
+                "titulo": titulo_mostrado,
+                "tipo_herramienta": "titulo_texto",
+                "config": {"bullets": (bullets[:6] or ["Sin información disponible"])},
+            })
+            orden += 1.0
+
+    if filas_paginas:
+        sb.table("paginas_clase").insert(filas_paginas).execute()
+
+    return {"clase_formal_id": clase_formal_id}
+
+
 @router.get("/ping")
 async def ping_evidenciamed():
     """Dispara una petición liviana a EvidenciaMed para despertar el servicio
@@ -388,4 +448,18 @@ async def documento_a_ppt(
         content=ppt_bytes,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         headers={"Content-Disposition": f'attachment; filename="{nombre}.pptx"'},
-  )
+    )
+
+
+@router.post("/clase-formal")
+async def documento_a_clase_formal(
+    body: DocumentoEditadoIn,
+    interrogador: dict = Depends(get_current_interrogador),
+):
+    """Recibe el texto YA EDITADO por el interrogador -mismo payload que
+    /ppt- y, en vez de un archivo descargable, crea el contenido directo
+    en Clases Formales (clases_formales + paginas_clase), listo para abrir
+    en el constructor y agregarle imagenes, trivia o dejar el semaforo
+    activo. Devuelve el id del contenido creado para redirigir al
+    constructor."""
+    return await _construir_clase_formal(body)
