@@ -290,6 +290,55 @@ async def _construir_ppt(doc: "DocumentoEditadoIn") -> bytes:
     return buffer.read()
 
 
+async def _generar_trivia_seccion(titulo: str, texto: str) -> Optional[dict]:
+    """Genera UNA trivia (pregunta + alternativas + correcta) sobre el
+    contenido real de la seccion -para insertarla ANTES de las paginas de
+    esa seccion (retrieval practice: preguntar antes de explicar fija
+    mejor el aprendizaje que preguntar al final). El interrogador decide
+    despues, en el constructor, si la deja, la edita o la borra.
+
+    Devuelve None si la seccion no tiene contenido real (nada que
+    preguntar) o si Claude/el parseo fallan -en ese caso simplemente no
+    se genera trivia para esa seccion, no se interrumpe el resto."""
+    texto = (texto or "").strip()
+    if not texto or texto == "—":
+        return None
+
+    prompt = f"""Genera UNA pregunta tipo trivia para una clase de docencia medica, basada EXCLUSIVAMENTE en el siguiente texto.
+
+REGLAS ESTRICTAS:
+- Una sola pregunta, con exactamente 4 alternativas.
+- Solo una alternativa correcta, claramente respaldada por el texto.
+- No inventes datos que no esten en el texto entregado.
+- Pregunta y alternativas cortas y directas, pensadas para responder en segundos desde el celular.
+
+Sección: {titulo}
+Texto:
+{texto}
+
+Devuelve EXCLUSIVAMENTE un JSON valido, sin texto adicional ni markdown:
+{{"pregunta": "...", "alternativas": ["...", "...", "...", "..."], "correcta": 0}}"""
+
+    try:
+        message = client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean)
+        alternativas = data.get("alternativas", [])[:5]
+        correcta = data.get("correcta", 0)
+        pregunta = data.get("pregunta", "").strip()
+        if not pregunta or len(alternativas) < 2 or not isinstance(correcta, int):
+            return None
+        return {"pregunta": pregunta, "alternativas": alternativas, "correcta": correcta}
+    except Exception:
+        # Sin trivia para esta seccion en vez de romper todo el generador.
+        return None
+
+
 async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
     """Mismo resumen 6x6 que _construir_ppt, pero en vez de dibujar slides
     en un .pptx, crea el contenido directo en Clases Formales:
@@ -297,8 +346,10 @@ async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
     paginas_clase por cada slide resuelta -titulo (tipo_herramienta
     'titulo') y una por cada bloque de bullets (tipo_herramienta
     'titulo_texto', bullets guardados tal cual en config, mismo array que
-    ya usa _agregar_slide_bullets-. No se sube ninguna imagen aca -eso se
-    agrega despues a mano en el constructor-."""
+    ya usa _agregar_slide_bullets-. Ademas, UNA trivia por seccion con
+    contenido real, insertada ANTES de las paginas de esa seccion. No se
+    sube ninguna imagen aca -eso se agrega despues a mano en el
+    constructor-."""
     contenido = sb.table("clases_formales").insert({"nombre": doc.titulo}).execute()
     clase_formal_id = contenido.data[0]["id"]
 
@@ -321,11 +372,24 @@ async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
     if doc.referencias:
         secciones_a_resumir.append(("Referencias", "\n".join(doc.referencias)))
 
-    # Resume TODAS las secciones en paralelo (no secuencial), igual que el PPT
-    resultados = await asyncio.gather(*(_resumir_seccion(titulo, texto) for titulo, texto in secciones_a_resumir))
+    # Resume Y genera trivia de TODAS las secciones en paralelo (no secuencial)
+    resultados_bullets, resultados_trivia = await asyncio.gather(
+        asyncio.gather(*(_resumir_seccion(titulo, texto) for titulo, texto in secciones_a_resumir)),
+        asyncio.gather(*(_generar_trivia_seccion(titulo, texto) for titulo, texto in secciones_a_resumir)),
+    )
 
     filas_paginas = []
-    for (titulo, _texto), slides_bullets in zip(secciones_a_resumir, resultados):
+    for (titulo, _texto), slides_bullets, trivia in zip(secciones_a_resumir, resultados_bullets, resultados_trivia):
+        if trivia:
+            filas_paginas.append({
+                "clase_formal_id": clase_formal_id,
+                "orden": orden,
+                "titulo": titulo,
+                "tipo_herramienta": "trivia",
+                "config": trivia,
+            })
+            orden += 1.0
+
         for i, bullets in enumerate(slides_bullets):
             titulo_mostrado = f"{titulo} (cont.)" if i > 0 else titulo
             filas_paginas.append({
