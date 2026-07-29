@@ -101,6 +101,34 @@ def descargar_material(material_id: str, body: DescargaIn):
     return {"url": url}
 
 
+# ---------------- DESCARGA ADMIN (revisar lo subido, sin registrar como descarga de alumno) ----------------
+@router.get("/{material_id}/descargar-admin")
+def descargar_material_admin(material_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """El interrogador necesita poder bajar lo que subió para revisarlo o
+    corregirlo afuera. No inserta en descargas_materiales -eso es
+    exclusivo del flujo de alumnos, para no ensuciar las estadisticas de
+    /materiales/analisis con aperturas del propio interrogador."""
+    material = sb.table("materiales").select("storage_path").eq("id", material_id).execute().data
+    if not material:
+        raise HTTPException(404, "Material no encontrado")
+
+    url = sb.storage.from_("materiales").get_public_url(material[0]["storage_path"])
+    return {"url": url}
+
+
+# ---------------- BORRAR (registro + archivo del storage) ----------------
+@router.delete("/{material_id}")
+def borrar_material(material_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    material = sb.table("materiales").select("storage_path").eq("id", material_id).execute().data
+    if not material:
+        raise HTTPException(404, "Material no encontrado")
+
+    sb.storage.from_("materiales").remove([material[0]["storage_path"]])
+    sb.table("materiales").delete().eq("id", material_id).execute()
+
+    return {"ok": True}
+
+
 # ---------------- ANÁLISIS (para el admin/interrogador) ----------------
 @router.get("/analisis")
 def analisis_materiales(interrogador: dict = Depends(get_current_interrogador)):
