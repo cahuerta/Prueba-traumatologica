@@ -23,6 +23,17 @@ casos clinicos muestra el QR antes de "presentando"-. El primer PATCH
 arranca la clase para real; los siguientes /avanzar mueven a la
 pagina siguiente como siempre.
 
+ASISTENCIA: el conteo EN VIVO se lee de la cache en memoria
+(services/cache_clases_formales.py), sin tocar Supabase en cada poll
+-mismo espiritu que cache_vivo.py, evitar pegarle a Supabase con
+lecturas de alta frecuencia-. Ademas, UNA sola vez, a los 15 minutos
+del inicio de la sesion, se guarda una foto del conteo en la tabla
+asistencia_clase (persistencia real, sobrevive a un reinicio del
+servidor) -no un insert por cada alumno que ingresa, un unico insert
+por sesion-. Ese chequeo ocurre de forma perezosa: se dispara la
+primera vez que GET /asistencia se llama despues de cumplidos los 15
+minutos, no con un cron aparte.
+
 Esta es la fila que el supraselector (routers/sesion_resolver.py) usa
 para decidir hacia donde mandar un codigo activo: si existe en
 sesiones_vivo -> caso clinico. Si existe en sesiones_clase -> Clases
@@ -41,6 +52,11 @@ Tabla usada: sesiones_clase (ya creada en Supabase).
                        que admin/proyeccion estan mostrando ahora)
   created_at          timestamptz
 
+Tabla usada: asistencia_clase (ya creada en Supabase).
+  sesion_id        uuid  (PK, FK a sesiones_clase.id)
+  total_presentes  int
+  guardado_at      timestamptz
+
 Avance de pagina: estrictamente secuencial, solo hacia adelante -una
 clase se recorre completa de principio a fin, no queda a medias ni
 admite saltos-. PATCH /avanzar mueve pagina_actual_orden a la siguiente
@@ -55,13 +71,18 @@ casos_vivo_profesor.py / casos_vivo_alumno.py.
 
 import random
 import string
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador
+from routers.conjuntos_comun import obtener_conjunto_activo_id
+from services import cache_clases_formales
 
 router = APIRouter(prefix="/clases-formales/sesiones", tags=["clases-formales-sesiones"])
+
+MINUTOS_FOTO_ASISTENCIA = 15
 
 
 # ---------------- MODELOS ----------------
@@ -92,6 +113,14 @@ def _generar_codigo_unico() -> str:
         if not existe:
             return codigo
     raise HTTPException(500, "No se pudo generar un codigo de acceso unico, intente de nuevo")
+
+
+def _minutos_transcurridos(created_at: str) -> float:
+    """created_at viene de Supabase como string ISO -acepta el sufijo
+    'Z' que datetime.fromisoformat no maneja directo en Python <3.11."""
+    ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    ahora = datetime.now(timezone.utc)
+    return (ahora - ts).total_seconds() / 60
 
 
 # ---------------- ENDPOINTS ----------------
@@ -141,6 +170,40 @@ def listar_sesiones(interrogador: dict = Depends(get_current_interrogador)):
         .execute()
         .data
     )
+
+
+@router.get("/{sesion_id}/asistencia")
+def asistencia_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Conteo EN VIVO desde la cache en memoria -no toca Supabase en cada
+    llamada-. Ademas, si ya pasaron 15 minutos desde el inicio de la
+    sesion y todavia no existe una foto guardada, la guarda ahora mismo
+    (unico insert por sesion, disparado de forma perezosa en este mismo
+    request)."""
+    sesion = sb.table("sesiones_clase").select("id, created_at").eq("id", sesion_id).execute().data
+    if not sesion:
+        raise HTTPException(404, "Sesion no encontrada")
+    sesion = sesion[0]
+
+    presentes = cache_clases_formales.obtener_total_presentes(sesion_id)
+
+    conjunto_id = obtener_conjunto_activo_id()
+    total_habilitados = (
+        sb.table("alumnos")
+        .select("id", count="exact")
+        .eq("conjunto_id", conjunto_id)
+        .execute()
+        .count
+    )
+
+    if _minutos_transcurridos(sesion["created_at"]) >= MINUTOS_FOTO_ASISTENCIA:
+        ya_guardada = sb.table("asistencia_clase").select("sesion_id").eq("sesion_id", sesion_id).execute().data
+        if not ya_guardada:
+            sb.table("asistencia_clase").insert({
+                "sesion_id": sesion_id,
+                "total_presentes": presentes,
+            }).execute()
+
+    return {"presentes": presentes, "total_habilitados": total_habilitados or 0}
 
 
 @router.patch("/{sesion_id}/avanzar")
@@ -199,3 +262,4 @@ def cerrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inter
         raise HTTPException(404, "Sesion no encontrada")
 
     return res.data[0]
+              
