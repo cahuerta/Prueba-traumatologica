@@ -104,7 +104,12 @@ async def subir_media_caso(
         storage_path, contenido, {"content-type": archivo.content_type}
     )
 
-    return {"media_url": storage_path, "media_tipo": tipo}
+    # URL firmada temporal para que el frontend pueda mostrar la vista
+    # previa de inmediato, sin exponer el bucket como publico (datos
+    # sensibles) ni requerir que la pagina se guarde primero.
+    url_preview = url_firmada_media("casos", storage_path)
+
+    return {"media_url": storage_path, "media_tipo": tipo, "url": url_preview}
 
 @router.post("/casos/{caso_id}/media")
 def asociar_media_caso(caso_id: str, media_url: str, media_tipo: str, interrogador: dict = Depends(get_current_interrogador)):
