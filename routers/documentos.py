@@ -16,6 +16,22 @@ Cuatro funciones:
                                      listo para abrir en el constructor y agregarle
                                      imagenes/trivia/semaforo.
 
+                                     Ademas de los bullets y la trivia, cada seccion
+                                     genera automaticamente hasta N graficos (SVG) -uno
+                                     por cada pagina que la seccion termino necesitando
+                                     segun _resumir_seccion-, a partir del texto
+                                     ENRIQUECIDO completo (no de los bullets ya resumidos,
+                                     que perdieron detalle). Si el contenido de la seccion
+                                     no da para tantos graficos como paginas, se devuelven
+                                     menos -no se fuerza un grafico generico por pagina-.
+                                     El SVG se guarda como CODIGO (no como imagen rasterizada
+                                     ni archivo en Storage) dentro de config.imagen_svg de
+                                     la pagina, junto a config.imagen_origen = "ia". Esto
+                                     coexiste sin pisarse con el flujo de imagen manual ya
+                                     existente (config.imagen_url / config.disposicion_imagen,
+                                     subido via /clases-formales/paginas/imagen): una pagina
+                                     tiene una u otra clave segun de donde vino su imagen.
+
 Variables de entorno esperadas (Render, backend Músculo):
   EVIDENCIAMED_URL       (ej: https://evidenciamed-api.onrender.com)
   EVIDENCIAMED_API_KEY   (la misma que usa el propio frontend de EvidenciaMed,
@@ -339,6 +355,63 @@ Devuelve EXCLUSIVAMENTE un JSON valido, sin texto adicional ni markdown:
         return None
 
 
+async def _generar_graficos_seccion(titulo: str, texto: str, num_paginas: int) -> list[Optional[str]]:
+    """Genera hasta `num_paginas` graficos SVG distintos para una seccion,
+    a partir del texto ENRIQUECIDO completo (no de los bullets ya
+    resumidos, que perdieron detalle). El tipo de grafico queda libre
+    -Claude decide segun el contenido: diagrama de flujo, cuadro
+    comparativo, esquema anatomico simplificado, timeline, etc-.
+
+    El numero de paginas ya viene resuelto por _resumir_seccion -este
+    no genera mas paginas, solo decide cuantas de las que ya existen
+    llevan grafico-. Si el contenido no da para tantos graficos como
+    paginas, Claude devuelve menos -no se fuerza un grafico generico-.
+
+    Devuelve una lista de largo `num_paginas`, con el SVG (str) en cada
+    posicion que Claude considero visualizable, o None en las que no.
+    Si Claude/el parseo fallan, devuelve todo None -no se interrumpe el
+    resto del pipeline."""
+    texto = (texto or "").strip()
+    if not texto or texto == "—" or num_paginas <= 0:
+        return [None] * max(num_paginas, 0)
+
+    prompt = f"""Eres un ilustrador medico especializado en material didactico para clases de traumatologia y ortopedia.
+
+A partir del siguiente texto, genera hasta {num_paginas} graficos distintos en SVG, pensados para acompañar diapositivas de una clase de docencia medica en el celular/proyector de los alumnos.
+
+REGLAS ESTRICTAS:
+- Cada grafico debe cubrir un aspecto o sub-tema DISTINTO del texto -no repitas el mismo contenido en dos graficos-.
+- Elige libremente el tipo de grafico segun lo que mejor represente cada sub-tema: diagrama de flujo, cuadro comparativo, esquema anatomico simplificado, tabla de clasificacion, timeline, etc.
+- Si el texto solo da para menos de {num_paginas} graficos utiles -porque no hay suficiente contenido visualizable, estructurado o comparativo-, genera SOLO los que realmente aporten. No inventes graficos genericos ni rellenes por completar.
+- SVG valido, viewBox "0 0 800 600", usa SOLO colores en formato hexadecimal (sin CSS externo, sin <style> con variables), texto legible en fuente sans-serif, fondo blanco o transparente.
+- No inventes datos, cifras ni afirmaciones que no esten en el texto entregado.
+- No incluyas nombres de pacientes ni informacion identificable -el texto es material clinico general, no un caso real-.
+
+Sección: {titulo}
+Texto:
+{texto}
+
+Devuelve EXCLUSIVAMENTE un JSON valido, sin texto adicional ni markdown, con como maximo {num_paginas} elementos:
+{{"graficos": ["<svg>...</svg>", "<svg>...</svg>"]}}"""
+
+    try:
+        message = client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean)
+        graficos = [g for g in data.get("graficos", []) if isinstance(g, str) and g.strip().startswith("<svg")]
+        graficos = graficos[:num_paginas]
+        # Rellena con None hasta num_paginas -las paginas sobrantes quedan sin grafico.
+        return graficos + [None] * (num_paginas - len(graficos))
+    except Exception:
+        # Sin graficos para esta seccion en vez de romper todo el generador.
+        return [None] * num_paginas
+
+
 async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
     """Mismo resumen 6x6 que _construir_ppt, pero en vez de dibujar slides
     en un .pptx, crea el contenido directo en Clases Formales:
@@ -347,9 +420,17 @@ async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
     'titulo') y una por cada bloque de bullets (tipo_herramienta
     'titulo_texto', bullets guardados tal cual en config, mismo array que
     ya usa _agregar_slide_bullets-. Ademas, UNA trivia por seccion con
-    contenido real, insertada ANTES de las paginas de esa seccion. No se
-    sube ninguna imagen aca -eso se agrega despues a mano en el
-    constructor-."""
+    contenido real, insertada ANTES de las paginas de esa seccion.
+
+    Cada pagina 'titulo_texto' recibe tambien, si Claude genero uno para
+    ella, su propio grafico SVG -a partir del texto enriquecido completo
+    de la seccion, no de los bullets- guardado en config.imagen_svg +
+    config.imagen_origen = 'ia'. El numero de graficos por seccion sigue
+    al numero de paginas que esa seccion termino necesitando: si hay
+    material para mas paginas, hay oportunidad de mas graficos; si el
+    contenido no da para tantos, quedan paginas sin grafico -no se fuerza-.
+    Esto convive sin pisarse con imagenes subidas a mano despues en el
+    constructor (config.imagen_url / config.disposicion_imagen)."""
     contenido = sb.table("clases_formales").insert({"nombre": doc.titulo}).execute()
     clase_formal_id = contenido.data[0]["id"]
 
@@ -372,14 +453,23 @@ async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
     if doc.referencias:
         secciones_a_resumir.append(("Referencias", "\n".join(doc.referencias)))
 
-    # Resume Y genera trivia de TODAS las secciones en paralelo (no secuencial)
+    # 1) Bullets y trivia de TODAS las secciones en paralelo (no dependen entre si).
     resultados_bullets, resultados_trivia = await asyncio.gather(
         asyncio.gather(*(_resumir_seccion(titulo, texto) for titulo, texto in secciones_a_resumir)),
         asyncio.gather(*(_generar_trivia_seccion(titulo, texto) for titulo, texto in secciones_a_resumir)),
     )
 
+    # 2) Con el numero de paginas de cada seccion ya resuelto (len(slides_bullets)),
+    #    se lanzan los graficos -todas las secciones en paralelo entre si-.
+    resultados_graficos = await asyncio.gather(*(
+        _generar_graficos_seccion(titulo, texto, len(slides_bullets))
+        for (titulo, texto), slides_bullets in zip(secciones_a_resumir, resultados_bullets)
+    ))
+
     filas_paginas = []
-    for (titulo, _texto), slides_bullets, trivia in zip(secciones_a_resumir, resultados_bullets, resultados_trivia):
+    for (titulo, _texto), slides_bullets, trivia, graficos_seccion in zip(
+        secciones_a_resumir, resultados_bullets, resultados_trivia, resultados_graficos
+    ):
         if trivia:
             filas_paginas.append({
                 "clase_formal_id": clase_formal_id,
@@ -392,12 +482,19 @@ async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
 
         for i, bullets in enumerate(slides_bullets):
             titulo_mostrado = f"{titulo} (cont.)" if i > 0 else titulo
+            config_pagina = {"bullets": (bullets[:6] or ["Sin información disponible"])}
+
+            grafico_svg = graficos_seccion[i] if i < len(graficos_seccion) else None
+            if grafico_svg:
+                config_pagina["imagen_svg"] = grafico_svg
+                config_pagina["imagen_origen"] = "ia"
+
             filas_paginas.append({
                 "clase_formal_id": clase_formal_id,
                 "orden": orden,
                 "titulo": titulo_mostrado,
                 "tipo_herramienta": "titulo_texto",
-                "config": {"bullets": (bullets[:6] or ["Sin información disponible"])},
+                "config": config_pagina,
             })
             orden += 1.0
 
@@ -523,7 +620,8 @@ async def documento_a_clase_formal(
     """Recibe el texto YA EDITADO por el interrogador -mismo payload que
     /ppt- y, en vez de un archivo descargable, crea el contenido directo
     en Clases Formales (clases_formales + paginas_clase), listo para abrir
-    en el constructor y agregarle imagenes, trivia o dejar el semaforo
-    activo. Devuelve el id del contenido creado para redirigir al
-    constructor."""
+    en el constructor y agregarle imagenes manuales adicionales, editar
+    trivia o dejar el semaforo activo. Las paginas ya vienen con grafico
+    SVG generado por IA cuando el contenido de la seccion lo permitio.
+    Devuelve el id del contenido creado para redirigir al constructor."""
     return await _construir_clase_formal(body)
