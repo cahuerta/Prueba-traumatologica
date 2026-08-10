@@ -24,6 +24,13 @@ Cuatro funciones:
                                      que perdieron detalle). Si el contenido de la seccion
                                      no da para tantos graficos como paginas, se devuelven
                                      menos -no se fuerza un grafico generico por pagina-.
+                                     Se prioriza graficar contenido cuantificable (ej.
+                                     epidemiologia con porcentajes) en vez de dejarlo como
+                                     texto. Cada grafico trae un flag `autoexplicativo`:
+                                     si transmite la idea completo por si solo, esa pagina
+                                     va SOLO con el grafico (bullets vacio) para no repetir
+                                     la misma idea en texto y grafico -el docente explica en
+                                     vivo-; si no, la pagina lleva ambos.
                                      El SVG se guarda como CODIGO (no como imagen rasterizada
                                      ni archivo en Storage) dentro de config.imagen_svg de
                                      la pagina, junto a config.imagen_origen = "ia". Esto
@@ -355,22 +362,30 @@ Devuelve EXCLUSIVAMENTE un JSON valido, sin texto adicional ni markdown:
         return None
 
 
-async def _generar_graficos_seccion(titulo: str, texto: str, num_paginas: int) -> list[Optional[str]]:
+async def _generar_graficos_seccion(titulo: str, texto: str, num_paginas: int) -> list[Optional[dict]]:
     """Genera hasta `num_paginas` graficos SVG distintos para una seccion,
     a partir del texto ENRIQUECIDO completo (no de los bullets ya
     resumidos, que perdieron detalle). El tipo de grafico queda libre
     -Claude decide segun el contenido: diagrama de flujo, cuadro
-    comparativo, esquema anatomico simplificado, timeline, etc-.
+    comparativo, esquema anatomico simplificado, timeline, grafico de
+    barras/torta para datos cuantificables, etc-.
 
     El numero de paginas ya viene resuelto por _resumir_seccion -este
     no genera mas paginas, solo decide cuantas de las que ya existen
     llevan grafico-. Si el contenido no da para tantos graficos como
     paginas, Claude devuelve menos -no se fuerza un grafico generico-.
 
-    Devuelve una lista de largo `num_paginas`, con el SVG (str) en cada
-    posicion que Claude considero visualizable, o None en las que no.
-    Si Claude/el parseo fallan, devuelve todo None -no se interrumpe el
-    resto del pipeline."""
+    Cada grafico viene acompañado de un flag `autoexplicativo`: si el
+    grafico por si solo transmite la idea completa (datos bien
+    etiquetados, con sus valores visibles), esa pagina se arma DESPUES
+    en _construir_clase_formal SOLO con el grafico, sin bullets -para no
+    repetir en texto lo que el grafico ya muestra-. El docente da la
+    explicacion en vivo. Si no es autoexplicativo, la pagina lleva ambos.
+
+    Devuelve una lista de largo `num_paginas`, con {"svg": str,
+    "autoexplicativo": bool} en cada posicion que Claude considero
+    visualizable, o None en las que no. Si Claude/el parseo fallan,
+    devuelve todo None -no se interrumpe el resto del pipeline."""
     texto = (texto or "").strip()
     if not texto or texto == "—" or num_paginas <= 0:
         return [None] * max(num_paginas, 0)
@@ -381,18 +396,23 @@ A partir del siguiente texto, genera hasta {num_paginas} graficos distintos en S
 
 REGLAS ESTRICTAS:
 - Cada grafico debe cubrir un aspecto o sub-tema DISTINTO del texto -no repitas el mismo contenido en dos graficos-.
-- Elige libremente el tipo de grafico segun lo que mejor represente cada sub-tema: diagrama de flujo, cuadro comparativo, esquema anatomico simplificado, tabla de clasificacion, timeline, etc.
+- PRIORIDAD: si el texto contiene datos cuantificables o comparables (incidencias, porcentajes, proporciones, tasas -ej. epidemiologia-), representalos como grafico de barras, torta o comparativo -es mas claro que dejarlos como texto plano-. Este es el caso mas obvio para graficar.
+- Para el resto del contenido, elige libremente el tipo de grafico segun lo que mejor represente cada sub-tema: diagrama de flujo, cuadro comparativo, esquema anatomico simplificado, tabla de clasificacion, timeline, etc.
 - Si el texto solo da para menos de {num_paginas} graficos utiles -porque no hay suficiente contenido visualizable, estructurado o comparativo-, genera SOLO los que realmente aporten. No inventes graficos genericos ni rellenes por completar.
 - SVG valido, viewBox "0 0 800 600", usa SOLO colores en formato hexadecimal (sin CSS externo, sin <style> con variables), texto legible en fuente sans-serif, fondo blanco o transparente.
 - No inventes datos, cifras ni afirmaciones que no esten en el texto entregado.
 - No incluyas nombres de pacientes ni informacion identificable -el texto es material clinico general, no un caso real-.
+
+Ademas, para CADA grafico indica si es AUTOEXPLICATIVO:
+- true: el grafico por si solo transmite la idea completa -datos bien etiquetados, con sus valores visibles en el propio grafico-, sin necesitar texto adicional en pantalla. Esa pagina se proyectara SOLO con el grafico; el docente explica en vivo.
+- false: el grafico necesita contexto adicional en texto para entenderse -esa pagina llevara el grafico Y los bullets juntos-.
 
 Sección: {titulo}
 Texto:
 {texto}
 
 Devuelve EXCLUSIVAMENTE un JSON valido, sin texto adicional ni markdown, con como maximo {num_paginas} elementos:
-{{"graficos": ["<svg>...</svg>", "<svg>...</svg>"]}}"""
+{{"graficos": [{{"svg": "<svg>...</svg>", "autoexplicativo": true}}, {{"svg": "<svg>...</svg>", "autoexplicativo": false}}]}}"""
 
     try:
         message = client.messages.create(
@@ -403,7 +423,13 @@ Devuelve EXCLUSIVAMENTE un JSON valido, sin texto adicional ni markdown, con com
         raw = message.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         data = json.loads(clean)
-        graficos = [g for g in data.get("graficos", []) if isinstance(g, str) and g.strip().startswith("<svg")]
+        graficos = []
+        for g in data.get("graficos", []):
+            if isinstance(g, dict) and isinstance(g.get("svg"), str) and g["svg"].strip().startswith("<svg"):
+                graficos.append({
+                    "svg": g["svg"],
+                    "autoexplicativo": bool(g.get("autoexplicativo", False)),
+                })
         graficos = graficos[:num_paginas]
         # Rellena con None hasta num_paginas -las paginas sobrantes quedan sin grafico.
         return graficos + [None] * (num_paginas - len(graficos))
@@ -482,11 +508,20 @@ async def _construir_clase_formal(doc: "DocumentoEditadoIn") -> dict:
 
         for i, bullets in enumerate(slides_bullets):
             titulo_mostrado = f"{titulo} (cont.)" if i > 0 else titulo
-            config_pagina = {"bullets": (bullets[:6] or ["Sin información disponible"])}
 
-            grafico_svg = graficos_seccion[i] if i < len(graficos_seccion) else None
-            if grafico_svg:
-                config_pagina["imagen_svg"] = grafico_svg
+            grafico = graficos_seccion[i] if i < len(graficos_seccion) else None
+
+            # Si el grafico es autoexplicativo -transmite la idea completa
+            # por si solo-, la pagina va SOLO con el grafico, sin bullets,
+            # para no repetir la misma idea dos veces. El docente explica
+            # en vivo. Si no lo es (o no hay grafico), se mantienen los
+            # bullets como contenido principal.
+            si_autoexplicativo = bool(grafico and grafico.get("autoexplicativo"))
+            bullets_finales = [] if si_autoexplicativo else (bullets[:6] or ["Sin información disponible"])
+
+            config_pagina = {"bullets": bullets_finales}
+            if grafico:
+                config_pagina["imagen_svg"] = grafico["svg"]
                 config_pagina["imagen_origen"] = "ia"
 
             filas_paginas.append({
