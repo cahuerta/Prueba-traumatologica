@@ -41,6 +41,17 @@ dinamica en vivo. Cubre 2 momentos:
    ingresar (invalidada en casos_vivo_alumno.py).
 
 Complementa a casos_vivo_alumno.py (endpoints publicos del alumno).
+
+NOTA sobre /media-url: bucket "casos" es privado y compartido con Clases
+Formales (mismo storage, decision confirmada con Cristobal para no gastar
+cuota en un bucket separado). Los demas endpoints de media aqui abajo
+(/casos/{caso_id}/media) exigen login Y un caso_id real en la tabla
+casos_clinicos -no sirven para una imagen de una pagina de Clases
+Formales, que no es un caso clinico-. /media-url es la puerta generica:
+recibe el path tal cual, sin depender de ninguna tabla, y SIN login,
+porque la Proyeccion de Clases Formales la ven los alumnos sin sesion
+iniciada. Sigue usando la misma url_firmada_media() de siempre -no se
+duplica logica, solo se expone una forma nueva y mas simple de llamarla.
 """
 
 import random
@@ -75,6 +86,28 @@ from routers.casos_vivo_comun import (
 )
 
 router = APIRouter(prefix="/casos-vivo", tags=["casos-vivo-profesor"])
+
+
+# ============================================================
+# MEDIA: token de acceso generico, publico, por path
+# ============================================================
+
+@router.get("/media-url")
+def obtener_media_url_publica(path: str):
+    """Endpoint publico (SIN login): dado el path de un archivo en el
+    bucket privado "casos", devuelve un token de acceso temporal fresco
+    (via url_firmada_media, con su cache de 30 min de siempre). No
+    depende de caso_id ni de ninguna tabla -sirve tanto para Casos
+    Clinicos como para Clases Formales, que comparte este mismo bucket-.
+    Sin login a proposito: la Proyeccion de Clases Formales la ven los
+    alumnos sin sesion iniciada."""
+    if not path:
+        raise HTTPException(400, "Falta el parametro 'path'")
+
+    url = url_firmada_media("casos", path)
+    if not url:
+        raise HTTPException(404, "Archivo no encontrado")
+    return {"url": url}
 
 
 # ============================================================
