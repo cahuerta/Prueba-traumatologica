@@ -57,11 +57,11 @@ Tabla usada: asistencia_clase (ya creada en Supabase).
   total_presentes  int
   guardado_at      timestamptz
 
-Avance de pagina: estrictamente secuencial, solo hacia adelante -una
-clase se recorre completa de principio a fin, no queda a medias ni
-admite saltos-. PATCH /avanzar mueve pagina_actual_orden a la siguiente
+Avance de pagina: estrictamente secuencial, de a una pagina, sin
+saltos. PATCH /avanzar mueve pagina_actual_orden a la siguiente
 pagina existente (por orden ascendente), o fija la primera si todavia
-no hay ninguna activa. El alumno nunca consulta esto -su pantalla es
+no hay ninguna activa. PATCH /retroceder vuelve a la pagina anterior,
+deteniendose en la primera (nunca vuelve a la fase de QR). El alumno nunca consulta esto -su pantalla es
 fija (preguntas + semaforo)-, solo lo usan admin y proyeccion. La
 lectura publica de "cual pagina esta activa ahora" vive en un archivo
 aparte (routers/clases_formales_actual.py), sin auth, siguiendo el
@@ -212,8 +212,8 @@ def avanzar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inte
     fija la primera pagina del contenido -esto es lo que hace el boton
     'Iniciar clase'-. Si ya hay una pagina activa, mueve
     pagina_actual_orden a la siguiente en la secuencia -estrictamente
-    hacia adelante, sin saltos ni retrocesos-. Si ya esta en la ultima
-    pagina, no hace nada (devuelve la sesion tal cual)."""
+    hacia adelante -para volver esta retroceder_sesion-. Si ya esta en
+    la ultima pagina, no hace nada (devuelve la sesion tal cual)."""
     sesion = sb.table("sesiones_clase").select("*").eq("id", sesion_id).execute().data
     if not sesion:
         raise HTTPException(404, "Sesion no encontrada")
@@ -254,6 +254,51 @@ def avanzar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inte
     return res.data[0]
 
 
+@router.patch("/{sesion_id}/retroceder")
+def retroceder_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Espejo de avanzar_sesion: mueve pagina_actual_orden a la pagina
+    ANTERIOR de la secuencia. Si ya esta en la primera pagina, o la clase
+    aun no se inicia (sin pagina activa), no hace nada y devuelve la
+    sesion tal cual -nunca vuelve a la fase de QR/asistencia: el QR ya
+    esta siempre visible en la esquina de la proyeccion para los
+    atrasados-.
+
+    No toca el estado de ninguna herramienta: al volver a una trivia se
+    ven los votos que ya tenia (y la correcta, si ya se habia revelado),
+    porque su cache vive por pagina_id y nunca se borra aqui. Despues de
+    retroceder, 'Siguiente' continua desde esta pagina, porque avanzar
+    siempre parte de la pagina activa."""
+    sesion = sb.table("sesiones_clase").select("*").eq("id", sesion_id).execute().data
+    if not sesion:
+        raise HTTPException(404, "Sesion no encontrada")
+    sesion = sesion[0]
+
+    if sesion["pagina_actual_orden"] is None:
+        return sesion
+
+    anterior = (
+        sb.table("paginas_clase")
+        .select("orden")
+        .eq("clase_formal_id", sesion["clase_formal_id"])
+        .lt("orden", sesion["pagina_actual_orden"])
+        .order("orden", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+
+    if not anterior:
+        return sesion
+
+    res = (
+        sb.table("sesiones_clase")
+        .update({"pagina_actual_orden": anterior[0]["orden"]})
+        .eq("id", sesion_id)
+        .execute()
+    )
+    return res.data[0]
+
+
 @router.patch("/{sesion_id}/cerrar")
 def cerrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Cierra la sesion -los alumnos ya no pueden entrar ni interactuar."""
@@ -262,4 +307,3 @@ def cerrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inter
         raise HTTPException(404, "Sesion no encontrada")
 
     return res.data[0]
-              
