@@ -93,18 +93,22 @@ router = APIRouter(prefix="/casos-vivo", tags=["casos-vivo-profesor"])
 # ============================================================
 
 @router.get("/media-url")
-def obtener_media_url_publica(path: str):
-    """Endpoint publico (SIN login): dado el path de un archivo en el
-    bucket privado "casos", devuelve un token de acceso temporal fresco
-    (via url_firmada_media, con su cache de 30 min de siempre). No
-    depende de caso_id ni de ninguna tabla -sirve tanto para Casos
-    Clinicos como para Clases Formales, que comparte este mismo bucket-.
-    Sin login a proposito: la Proyeccion de Clases Formales la ven los
-    alumnos sin sesion iniciada."""
+def obtener_media_url_publica(path: str, bucket: str = "casos"):
+    """Endpoint publico (SIN login): dado el path de un archivo en un
+    bucket privado del proyecto, devuelve un token de acceso temporal
+    fresco (via url_firmada_media, con su cache de 30 min de siempre).
+    No depende de caso_id ni de ninguna tabla -sirve tanto para Casos
+    Clinicos y Clases Formales (bucket "casos", el default de siempre)
+    como para media de preguntas de caso (bucket "preguntas", pasando
+    ?bucket=preguntas), que no tiene fila en banco_preguntas y por eso
+    no puede usar /preguntas/{id}/media-. Sin login a proposito: la
+    Proyeccion de Clases Formales la ven los alumnos sin sesion iniciada."""
     if not path:
         raise HTTPException(400, "Falta el parametro 'path'")
+    if bucket not in ("casos", "preguntas"):
+        raise HTTPException(400, "Bucket invalido")
 
-    url = url_firmada_media("casos", path)
+    url = url_firmada_media(bucket, path)
     if not url:
         raise HTTPException(404, "Archivo no encontrado")
     return {"url": url}
@@ -233,7 +237,11 @@ async def subir_media_pregunta_caso(
         storage_path, contenido, {"content-type": archivo.content_type}
     )
 
-    return {"media_url": storage_path, "media_tipo": tipo}
+    # URL firmada temporal para previsualizar de inmediato, mismo patron
+    # que subir_media_caso (bucket "casos") mas arriba.
+    url_preview = url_firmada_media("preguntas", storage_path)
+
+    return {"media_url": storage_path, "media_tipo": tipo, "url": url_preview}
 
 @router.post("/casos/{caso_id}/preguntas")
 def crear_pregunta_caso(caso_id: str, p: PreguntaCasoIn, interrogador: dict = Depends(get_current_interrogador)):
