@@ -64,3 +64,11 @@ def obtener_mi_resultado(pagina_id: str, alumno_id: str) -> dict | None:
     activa que consulta en silencio)."""
     estado = _estado(pagina_id)
     return estado["respuestas"].get(alumno_id)
+
+
+def obtener_respuestas_trivia(pagina_id: str) -> dict:
+    """{alumno_id: letra} de la trivia de esta pagina -copia, para no
+    exponer el dict interno-. Solo lo usa el panel del interrogador
+    (detalle nombre -> letra, igual que Casos Clinicos), nunca la
+    proyeccion ni el alumno."""
+    return dict(_estado(pagina_id)["respuestas"])
