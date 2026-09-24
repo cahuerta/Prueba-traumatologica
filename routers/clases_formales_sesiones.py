@@ -23,8 +23,11 @@ casos clinicos muestra el QR antes de "presentando"-. El primer PATCH
 arranca la clase para real; los siguientes /avanzar mueven a la
 pagina siguiente como siempre.
 
-ASISTENCIA: el conteo EN VIVO se lee de la cache en memoria
-(services/cache_clases_formales.py), sin tocar Supabase en cada poll
+ASISTENCIA: igual que Casos Clinicos, cada ingreso (nombre + RUT o
+matricula) queda registrado por alumno en asistencia_clase_alumnos. El
+conteo y la lista EN VIVO se leen de la cache en memoria
+(services/cache_clases_formales.py, recargada desde Supabase tras un
+reinicio), sin tocar Supabase en cada poll
 -mismo espiritu que cache_vivo.py, evitar pegarle a Supabase con
 lecturas de alta frecuencia-. Ademas, UNA sola vez, a los 15 minutos
 del inicio de la sesion, se guarda una foto del conteo en la tabla
@@ -51,6 +54,10 @@ Tabla usada: sesiones_clase (ya creada en Supabase).
                        posicion en la secuencia de paginas_clase.orden
                        que admin/proyeccion estan mostrando ahora)
   created_at          timestamptz
+
+Tabla usada: asistencia_clase_alumnos (migracion_asistencia_clase_alumnos.sql):
+  un registro por alumno que ingresa -igual que asistencia_vivo de Casos
+  Clinicos-. Se escribe en clases_formales_ingreso.py.
 
 Tabla usada: asistencia_clase (ya creada en Supabase).
   sesion_id        uuid  (PK, FK a sesiones_clase.id)
@@ -174,17 +181,32 @@ def listar_sesiones(interrogador: dict = Depends(get_current_interrogador)):
 
 @router.get("/{sesion_id}/asistencia")
 def asistencia_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
-    """Conteo EN VIVO desde la cache en memoria -no toca Supabase en cada
-    llamada-. Ademas, si ya pasaron 15 minutos desde el inicio de la
-    sesion y todavia no existe una foto guardada, la guarda ahora mismo
-    (unico insert por sesion, disparado de forma perezosa en este mismo
-    request)."""
+    """Solo el interrogador (auth). Conteo y LISTA de presentes con nombre
+    -igual que Casos Clinicos-, servidos desde la memoria. Si el servidor
+    se reinicio, la primera llamada recarga la lista desde Supabase
+    (asistencia_clase_alumnos), asi no se pierde nadie.
+
+    Ademas, si ya pasaron 15 minutos desde el inicio de la sesion y
+    todavia no existe una foto del conteo, la guarda ahora mismo (unico
+    insert por sesion, disparado de forma perezosa en este mismo request)."""
     sesion = sb.table("sesiones_clase").select("id, created_at").eq("id", sesion_id).execute().data
     if not sesion:
         raise HTTPException(404, "Sesion no encontrada")
     sesion = sesion[0]
 
-    presentes = cache_clases_formales.obtener_total_presentes(sesion_id)
+    if not cache_clases_formales.esta_cargada(sesion_id):
+        filas = (
+            sb.table("asistencia_clase_alumnos")
+            .select("alumno_id, marcado_at, alumnos(nombre, rut)")
+            .eq("sesion_id", sesion_id)
+            .order("marcado_at")
+            .execute()
+            .data
+        )
+        cache_clases_formales.cargar_desde_supabase(sesion_id, filas)
+
+    lista = cache_clases_formales.obtener_presentes(sesion_id)
+    presentes = len(lista)
 
     conjunto_id = obtener_conjunto_activo_id()
     total_habilitados = (
@@ -203,7 +225,16 @@ def asistencia_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
                 "total_presentes": presentes,
             }).execute()
 
-    return {"presentes": presentes, "total_habilitados": total_habilitados or 0}
+    # "presentes" sigue siendo el NUMERO (lo usan la proyeccion y el
+    # mando); la lista con nombres va aparte en "lista_presentes".
+    return {
+        "presentes": presentes,
+        "total_habilitados": total_habilitados or 0,
+        "lista_presentes": [
+            {"alumno_id": p["alumno_id"], "nombre": p["nombre"], "rut": p["rut"], "marcado_at": p["marcado_at"]}
+            for p in lista
+        ],
+    }
 
 
 @router.patch("/{sesion_id}/avanzar")
