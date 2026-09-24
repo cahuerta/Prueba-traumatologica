@@ -42,8 +42,14 @@ def panel_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interr
 
     return {
         **estado,
+        # Siempre presentes, aunque la pregunta actual no se pueda
+        # resolver: la proyeccion los usa para saber si esta en el inicio
+        # de la sesion (caso 1, pregunta 1) y mostrar el QR. Antes, si la
+        # pregunta no se encontraba, estos campos no venian y la
+        # proyeccion quedaba en "Esperando..." sin QR.
+        "caso_actual_orden": sesion["caso_actual_orden"],
+        "pregunta_actual_orden": sesion["pregunta_actual_orden"],
         "codigo_acceso": codigo_acceso,
         "resultados": resultados,
         "asistencia": asistencia,
     }
-    
