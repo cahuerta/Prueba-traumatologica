@@ -3,9 +3,10 @@ routers/clases_formales_trivia.py
 Herramienta "trivia" de Clases Formales: el interrogador arma la
 pregunta y alternativas de antemano dentro de la pagina (paginas_clase.config
 = {pregunta, alternativas: [...], correcta: indice}), el alumno responde
-en vivo solo con una LETRA (A-E) desde un selector fijo -nunca ve la
-pregunta ni las alternativas, su pantalla no depende de la pagina
-actual-. El interrogador ve el conteo en vivo y decide cuando revelar.
+en vivo con una LETRA (A-E): en su telefono ve la pregunta y cada
+alternativa con su letra (la proyeccion puede mostrar solo la imagen
+mientras votan). El interrogador ve el conteo en vivo y decide cuando
+revelar.
 
 Efimero -igual que el semaforo, nunca se persiste a disco ni a
 Supabase-. Aislado por PAGINA (pagina_id) -a diferencia del semaforo,
@@ -15,8 +16,9 @@ de otra. Por estar aislada por pagina, no necesita reinicio explicito
 del admin -cada pagina nueva ya empieza vacia sola, imposible que se
 mezcle con la trivia de otra pagina.
 
-Sin identidad de alumno en los resultados -mismo criterio que preguntas
-y semaforo-. El alumno NO tiene login propio: valida su RUT contra el
+Sin identidad de alumno en los resultados que ve la proyeccion. Solo el
+interrogador puede ver el detalle nombre -> letra (GET /detalle), igual
+que en Casos Clinicos. El alumno NO tiene login propio: valida su RUT contra el
 conjunto activo en cada request.
 """
 
@@ -30,6 +32,7 @@ from services.cache_trivia_clases_formales import (
     obtener_resultado_trivia,
     revelar_trivia,
     obtener_mi_resultado,
+    obtener_respuestas_trivia,
 )
 
 router = APIRouter(prefix="/clases-formales/trivia", tags=["clases-formales-trivia"])
@@ -70,6 +73,38 @@ def resultado(pagina_id: str, interrogador: dict = Depends(get_current_interroga
     return obtener_resultado_trivia(pagina_id)
 
 
+@router.get("/{pagina_id}/detalle")
+def detalle(pagina_id: str, interrogador: dict = Depends(get_current_interrogador)):
+    """Solo el interrogador: nombre -> letra de quienes respondieron la
+    trivia de esta pagina, para elegir a quien pedir el fundamento oral
+    -igual que el detalle de Casos Clinicos-. Las respuestas vienen de la
+    memoria; los nombres, de una consulta puntual a la tabla alumnos.
+    Nunca lo ven la proyeccion ni el alumno."""
+    respuestas = obtener_respuestas_trivia(pagina_id)
+    if not respuestas:
+        return []
+
+    alumnos_info = (
+        sb.table("alumnos")
+        .select("id, nombre, rut")
+        .in_("id", list(respuestas.keys()))
+        .execute()
+        .data
+    )
+    por_id = {a["id"]: a for a in alumnos_info}
+
+    detalle = [
+        {
+            "letra": letra,
+            "nombre": (por_id.get(alumno_id) or {}).get("nombre") or "",
+            "rut": (por_id.get(alumno_id) or {}).get("rut") or "",
+        }
+        for alumno_id, letra in respuestas.items()
+    ]
+    detalle.sort(key=lambda d: (d["letra"], d["nombre"].lower()))
+    return detalle
+
+
 @router.patch("/{pagina_id}/revelar")
 def revelar(pagina_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Marca la trivia de esta pagina como revelada -desde aca la
@@ -82,8 +117,8 @@ def revelar(pagina_id: str, interrogador: dict = Depends(get_current_interrogado
 # ---------------- ENDPOINTS PUBLICOS (alumno) ----------------
 @router.post("/{pagina_id}/responder")
 def responder(pagina_id: str, body: ResponderIn):
-    """El alumno responde con su letra, desde el selector fijo -sin
-    saber a que pregunta corresponde."""
+    """El alumno responde con la letra de la alternativa que eligio en
+    su telefono."""
     letra = body.letra.strip().upper()
     if letra not in LETRAS_VALIDAS:
         raise HTTPException(400, "Letra invalida, debe ser A-E")
@@ -101,4 +136,3 @@ def mi_respuesta(pagina_id: str, rut: str):
     lo hace el frontend con el config de la pagina."""
     alumno_id = _validar_alumno(rut)
     return {"letra": obtener_mi_resultado(pagina_id, alumno_id)}
-    
