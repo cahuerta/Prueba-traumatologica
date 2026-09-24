@@ -108,7 +108,7 @@ def obtener_sesion_por_codigo(codigo: str) -> dict:
     return sesion
 
 def caso_actual(sesion: dict) -> Optional[dict]:
-    """Devuelve el caso clinico completo (titulo, vineta, media) en el orden actual de la sesion."""
+    """Devuelve el caso clinico completo (titulo, vineta, media) en la posicion actual de la sesion."""
     presentacion_id = sesion["presentacion_id"]
     orden = sesion["caso_actual_orden"]
 
@@ -116,16 +116,25 @@ def caso_actual(sesion: dict) -> Optional[dict]:
     if encontrado:
         return caso_cacheado
 
-    puente = sb.table("presentacion_casos").select(
-        "casos_clinicos(id, region, titulo, vineta_clinica, media_url, media_tipo)"
-    ).eq("presentacion_id", presentacion_id).eq("orden", orden).execute().data
+    # Por POSICION (el N-esimo caso ordenado por 'orden'), no por el valor
+    # exacto de 'orden': si se quito un caso de la presentacion, los
+    # 'orden' quedan con huecos (ej. 2, 3, 4) y buscar orden == 1 no
+    # encontraba nada -la sesion no arrancaba y la proyeccion mostraba
+    # "Esperando..." en vez del QR-. La navegacion ya razona por posicion
+    # (compara contra el TOTAL de casos/preguntas), asi que esto la
+    # vuelve consistente.
+    puente = []
+    if orden and orden >= 1:
+        puente = sb.table("presentacion_casos").select(
+            "casos_clinicos(id, region, titulo, vineta_clinica, media_url, media_tipo)"
+        ).eq("presentacion_id", presentacion_id).order("orden").range(orden - 1, orden - 1).execute().data
     caso = puente[0]["casos_clinicos"] if puente else None
 
     cache_vivo.guardar_posicion_caso_cache(presentacion_id, orden, caso)
     return caso
 
 def pregunta_actual(sesion: dict) -> Optional[dict]:
-    """Resuelve la pregunta activa navegando presentacion->caso(orden)->pregunta(orden).
+    """Resuelve la pregunta activa navegando presentacion->caso(posicion)->pregunta(posicion).
     caso_preguntas ya NO depende de banco_preguntas: la pregunta, opciones,
     correcta y su media viven directo en la fila. Devuelve un dict PLANO con
     los campos de caso_preguntas + la clave "caso" con el caso clinico completo."""
@@ -138,10 +147,14 @@ def pregunta_actual(sesion: dict) -> Optional[dict]:
     if cacheada is not None:
         return {"caso": caso, **cacheada}
 
+    # Por POSICION dentro del caso (misma razon que en caso_actual: si se
+    # borro una pregunta, los 'orden' quedan con huecos).
+    if not orden or orden < 1:
+        return None
     filas = sb.table("caso_preguntas").select(
         "id, pregunta, opciones, correcta, media_url, media_tipo, "
         "explicacion_generada, fuentes_generadas"
-    ).eq("caso_id", caso["id"]).eq("orden", orden).execute().data
+    ).eq("caso_id", caso["id"]).order("orden").range(orden - 1, orden - 1).execute().data
     if not filas:
         return None
 
