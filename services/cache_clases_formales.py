@@ -12,10 +12,10 @@ responde una sola vez "sigo?" y esa respuesta se mantiene viva durante
 toda la clase, sin reiniciarse al cambiar de pagina. Aislado por
 sesion_id: cada sesion en vivo tiene su propio espacio en memoria.
 
-La asistencia sigue el mismo criterio: se cuenta presente al alumno
-apenas ingresa con su RUT (ver endpoint de ingreso), y ese conteo se
-mantiene vivo durante toda la sesion -no depende de pagina ni de
-polling repetido-. Aislada por sesion_id igual que el semaforo.
+La asistencia es la excepcion: igual que en Casos Clinicos, cada ingreso
+(nombre + RUT o matricula, validado contra el conjunto activo) se
+persiste en Supabase, y esta memoria es solo una copia rapida para el
+polling del mando -se recarga desde Supabase tras un reinicio-.
 
 Como el semaforo, esto vive solo en RAM del proceso -mismo supuesto que
 cache_vivo.py: valido unicamente porque el servicio corre con UN SOLO
@@ -64,19 +64,56 @@ def obtener_resultado_semaforo(sesion_id: str) -> dict:
     return {"total": total, "porcentaje_sigo": round(porcentaje, 1), "color": color}
 
 
-# ---------------- ASISTENCIA (quien ha ingresado con su RUT, por sesion) ----------------
-_asistencia: dict = {}   # sesion_id -> set(rut)
+# ---------------- ASISTENCIA (quien ingreso, con nombre, por sesion) ----------------
+# Igual que Casos Clinicos: cada ingreso se PERSISTE en Supabase
+# (asistencia_clase_alumnos, ver clases_formales_ingreso.py) y ademas se
+# guarda aca en memoria para responder rapido el polling del mando. Si el
+# servidor se reinicia, la memoria arranca vacia y se recarga una vez
+# desde Supabase (ver clases_formales_sesiones.asistencia_sesion), asi que
+# el conteo y los nombres ya no se pierden con un reinicio de Render.
+_asistencia: dict = {}   # sesion_id -> {alumno_id: {"nombre", "rut", "marcado_at"}}
+_cargada: set = set()    # sesiones ya sincronizadas con Supabase en este proceso
 
 
-def marcar_presente(sesion_id: str, rut: str):
-    """Se llama una vez por ingreso -si el alumno entra de nuevo con el
-    mismo RUT, el set no duplica, sigue contando una sola vez-. Vive
-    durante toda la sesion, igual que el semaforo."""
-    if sesion_id not in _asistencia:
-        _asistencia[sesion_id] = set()
-    _asistencia[sesion_id].add(rut)
+def marcar_presente(sesion_id: str, alumno_id: str, nombre: str, rut: str, marcado_at: str):
+    """Se llama una vez por ingreso. Si el alumno entra de nuevo, no se
+    duplica (clave alumno_id): se actualiza su nombre y se conserva la
+    hora del primer ingreso."""
+    presentes = _asistencia.setdefault(sesion_id, {})
+    previo = presentes.get(alumno_id)
+    presentes[alumno_id] = {
+        "nombre": nombre,
+        "rut": rut,
+        "marcado_at": previo["marcado_at"] if previo else marcado_at,
+    }
+
+
+def esta_cargada(sesion_id: str) -> bool:
+    return sesion_id in _cargada
+
+
+def cargar_desde_supabase(sesion_id: str, filas: list):
+    """Recarga la asistencia de una sesion desde Supabase (tras un
+    reinicio). 'filas' = [{alumno_id, marcado_at, alumnos: {nombre, rut}}].
+    Lo que ya estaba en memoria (ingresos posteriores) se conserva."""
+    presentes = _asistencia.setdefault(sesion_id, {})
+    for f in filas:
+        alumno = f.get("alumnos") or {}
+        presentes.setdefault(f["alumno_id"], {
+            "nombre": alumno.get("nombre") or "",
+            "rut": alumno.get("rut") or "",
+            "marcado_at": f.get("marcado_at"),
+        })
+    _cargada.add(sesion_id)
+
+
+def obtener_presentes(sesion_id: str) -> list:
+    """[{alumno_id, nombre, rut, marcado_at}] en orden de llegada."""
+    presentes = _asistencia.get(sesion_id, {})
+    lista = [{"alumno_id": aid, **datos} for aid, datos in presentes.items()]
+    lista.sort(key=lambda p: p.get("marcado_at") or "")
+    return lista
 
 
 def obtener_total_presentes(sesion_id: str) -> int:
-    return len(_asistencia.get(sesion_id, set()))
-    
+    return len(_asistencia.get(sesion_id, {}))
