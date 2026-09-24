@@ -55,8 +55,10 @@ duplica logica, solo se expone una forma nueva y mas simple de llamarla.
 """
 
 import random
+import re
 import string
 import time
+import unicodedata
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
@@ -125,6 +127,17 @@ def crear_caso(c: CasoIn, interrogador: dict = Depends(get_current_interrogador)
     res = sb.table("casos_clinicos").insert(row).execute()
     return res.data[0]
 
+def _nombre_archivo_seguro(nombre: Optional[str]) -> str:
+    """Nombre de archivo apto como key de Supabase Storage: sin tildes ni
+    "ñ" (Storage rechaza keys con caracteres no ASCII -"Invalid key"-,
+    ej. "radiografía cadera.png"), espacios como guion bajo y solo
+    letras, numeros, punto, guion y guion bajo. Conserva la extension."""
+    nombre = nombre or "archivo"
+    sin_tildes = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode("ascii")
+    limpio = re.sub(r"[^A-Za-z0-9._-]+", "_", sin_tildes).strip("._") or "archivo"
+    return limpio[:120]
+
+
 @router.post("/casos/media")
 async def subir_media_caso(
     tipo: str = Form(...),  # "foto" | "video"
@@ -135,7 +148,7 @@ async def subir_media_caso(
         raise HTTPException(400, "Tipo invalido, debe ser 'foto' o 'video'")
 
     contenido = await archivo.read()
-    storage_path = f"{int(time.time())}-{archivo.filename}"
+    storage_path = f"{int(time.time())}-{_nombre_archivo_seguro(archivo.filename)}"
 
     sb.storage.from_("casos").upload(
         storage_path, contenido, {"content-type": archivo.content_type}
@@ -230,7 +243,7 @@ async def subir_media_pregunta_caso(
         raise HTTPException(400, "Tipo invalido, debe ser 'foto' o 'video'")
 
     contenido = await archivo.read()
-    storage_path = f"{int(time.time())}-{archivo.filename}"
+    storage_path = f"{int(time.time())}-{_nombre_archivo_seguro(archivo.filename)}"
 
     # Reusa el bucket privado "preguntas" que ya existe (mismo patron que banco_preguntas).
     sb.storage.from_("preguntas").upload(
