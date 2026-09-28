@@ -38,12 +38,18 @@ con el resto del esquema de Clases Formales).
   tipo_herramienta  text   ("ninguna" | "semaforo" | "espectro" | ...)
   config            jsonb
   created_at        timestamptz
+
+CACHE: las paginas de cada contenido se sirven desde memoria a la
+proyeccion, el mando y los alumnos (services/cache_clases_formales.py).
+Toda escritura de este archivo invalida las paginas de ese contenido,
+asi una edicion hecha con la clase en curso se ve en el proximo poll.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador
+from services import cache_clases_formales
 
 router = APIRouter(prefix="/clases-formales/paginas", tags=["clases-formales-paginas"])
 
@@ -67,6 +73,14 @@ class PaginaEditarIn(BaseModel):
 class MoverIn(BaseModel):
     orden_anterior: float | None = None  # None si va al principio
     orden_siguiente: float | None = None  # None si va al final
+
+
+def _invalidar(filas: list):
+    """Invalida las paginas del contenido al que pertenece la fila tocada.
+    Si Supabase no devolvio clase_formal_id, limpia todo (se recarga en
+    el proximo poll, una sola consulta)."""
+    clase_formal_id = (filas[0] or {}).get("clase_formal_id") if filas else None
+    cache_clases_formales.invalidar_paginas(clase_formal_id)
 
 
 # ---------------- ENDPOINTS ----------------
@@ -94,6 +108,7 @@ def crear_pagina(body: PaginaIn, interrogador: dict = Depends(get_current_interr
         "config": body.config,
     }).execute()
 
+    cache_clases_formales.invalidar_paginas(body.clase_formal_id)
     return res.data[0]
 
 
@@ -126,6 +141,7 @@ def editar_pagina(
     if not res.data:
         raise HTTPException(404, "Pagina no encontrada")
 
+    _invalidar(res.data)
     return res.data[0]
 
 
@@ -155,6 +171,7 @@ def mover_pagina(
     if not res.data:
         raise HTTPException(404, "Pagina no encontrada")
 
+    _invalidar(res.data)
     return res.data[0]
 
 
@@ -164,4 +181,5 @@ def eliminar_pagina(pagina_id: str, interrogador: dict = Depends(get_current_int
     if not res.data:
         raise HTTPException(404, "Pagina no encontrada")
 
+    _invalidar(res.data)
     return {"ok": True}
