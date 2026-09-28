@@ -13,6 +13,11 @@ Flujo (para no gastar de mas):
    material no alcanza o la region no tiene material: /search + /analyze/doi
    con 1 paper, resumido para voz y aclarando que no viene del curso.
 
+Texto limpio para la voz: los prompts piden SOLO las palabras que se dicen
+y limpiar_acotaciones() quita cualquier acotacion teatral que el modelo
+agregue igual (ej. "(Se levanta y habla con voz clara)", "*sonrie*",
+"Respuesta:"), para que la medica no la lea en voz alta.
+
 Reutiliza la conexion a Supabase y el lector de .docx de fundamento_vivo.py
 sin modificarlo.
 
@@ -81,6 +86,63 @@ def recortar_palabras(texto: str, maximo: int = MAX_PALABRAS) -> str:
     if ultimo_punto > len(corto) * 0.5:
         return corto[: ultimo_punto + 1]
     return corto.rstrip(",;:") + "."
+
+
+# Acotacion teatral (gesto, postura, tono de voz). Lista acotada a
+# expresiones que no aparecen en una respuesta clinica: "pie", "tono" o
+# "mira" sueltos NO cuentan, para no borrar contenido real.
+_ACOTACION = re.compile(
+    r"\b(se levanta|levant[aá]ndose|se pone de pie|poni[eé]ndose de pie|se acerca|se dirige|"
+    r"se gira|sonr[ií]e|sonriendo|asiente|carraspea|aclara la garganta|hace una pausa|"
+    r"con voz|en voz alta|habla con|dirigi[eé]ndose|mirando al|frente al curso|con tono)\b",
+    re.IGNORECASE,
+)
+# Primera frase SIN parentesis que es solo acotacion: debe EMPEZAR asi.
+_INICIO_ACOTACION = re.compile(
+    r"^(se levanta|levant[aá]ndose|se pone de pie|poni[eé]ndose de pie|se acerca|se dirige|"
+    r"se gira|sonr[ií]e|sonriendo|asiente|carraspea|aclara la garganta|hace una pausa|"
+    r"con voz|en voz alta|habla con|dirigi[eé]ndose|mirando al|frente al curso|con tono)\b",
+    re.IGNORECASE,
+)
+# Prefijos tipo guion: "Docente:", "Respuesta:", "Doctora:"
+_PREFIJO = re.compile(
+    r"^\s*(docente|profesora?|doctora?|respuesta|avatar|m[eé]dica|asistente)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def limpiar_acotaciones(texto: str) -> str:
+    """Quita del texto lo que NO se debe leer en voz alta:
+    - bloques entre *asteriscos*, _guiones bajos_ o [corchetes];
+    - parentesis que describen gestos/voz (los parentesis clinicos, como
+      "(LCA)", se conservan);
+    - una primera frase que sea solo acotacion, con o sin parentesis
+      ("Se levanta y habla con voz clara: ...");
+    - prefijos de guion ("Docente:", "Respuesta:") y comillas envolventes."""
+    t = (texto or "").strip()
+    t = re.sub(r"\*+[^*]*\*+", " ", t)
+    t = re.sub(r"(?<!\w)_[^_]+_(?!\w)", " ", t)
+    t = re.sub(r"\[[^\]]*\]", " ", t)
+    t = re.sub(r"\(([^()]*)\)", lambda m: " " if _ACOTACION.search(m.group(1)) else m.group(0), t)
+    t = re.sub(r"\s+", " ", t).strip()
+    # Parentesis inicial sin cerrar: "(Se levanta y habla con voz clara. La fractura..."
+    if t.startswith("(") and ")" not in t.split(".")[0]:
+        t = t[1:].strip()
+    # Primera frase que es solo acotacion (termina en ":" o "." y es corta)
+    m = re.match(r"^([^.:!?]{0,120})[.:]\s+", t)
+    if m and _INICIO_ACOTACION.match(m.group(1).strip()) and len(m.group(1).split()) <= 15:
+        t = t[m.end():].strip()
+    t = _PREFIJO.sub("", t).strip()
+    t = t.strip('"“”«» ').strip()
+    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
+    if t and t[0].islower():
+        t = t[0].upper() + t[1:]
+    return t
+
+
+def texto_para_voz(texto: str) -> str:
+    """Limpieza de acotaciones + limite de palabras."""
+    return recortar_palabras(limpiar_acotaciones(texto))
 
 
 # ---------------- material del curso (.docx y .pptx) ----------------
@@ -186,8 +248,8 @@ def clasificar(pregunta: str, regiones: List[str]) -> dict:
 def responder_con_material(pregunta: str, region: str, contexto: str) -> Optional[str]:
     """Devuelve la respuesta, o None si el material no permite responder."""
     prompt = (
-        "Eres una docente de traumatología que responde EN VOZ ALTA, frente al curso, la pregunta "
-        "de un alumno de 4to año de medicina. Una voz sintética leerá tu respuesta.\n\n"
+        "Escribe la respuesta a la pregunta de un alumno de 4to año de medicina, en el tono de una "
+        "docente de traumatología. Una voz sintética leerá tu texto TAL CUAL, frente al curso.\n\n"
         f"REGIÓN: {region}\nPREGUNTA: {pregunta}\n\n"
         "MATERIAL DEL CURSO (documentos y presentaciones de los docentes, cada uno bajo '### Título'):\n"
         f"{contexto}\n\n"
@@ -196,14 +258,17 @@ def responder_con_material(pregunta: str, region: str, contexto: str) -> Optiona
         f"- Si el material no permite responder, escribe exactamente {NO_ESTA} y nada más.\n"
         f"- Máximo {MAX_PALABRAS} palabras, en 2 a 4 frases claras, español de Chile.\n"
         "- Sin listas, viñetas, títulos, asteriscos ni formato: solo texto corrido para ser hablado.\n"
-        "- No menciones los títulos de los documentos ni las diapositivas."
+        "- No menciones los títulos de los documentos ni las diapositivas.\n"
+        "- Escribe SOLO las palabras que se dicen. Nada de acotaciones ni descripciones de gestos, "
+        "postura o tono de voz (por ejemplo, nada como '(se levanta y habla con voz clara)'), "
+        "sin paréntesis de ese tipo y sin prefijos como 'Respuesta:'. Empieza directo con la respuesta."
     )
     texto = _texto_de(client.messages.create(
         model=MODELO_RESPUESTA, max_tokens=300, messages=[{"role": "user", "content": prompt}],
     ))
     if not texto or NO_ESTA in texto:
         return None
-    return recortar_palabras(texto)
+    return texto_para_voz(texto) or None
 
 
 def _primer_autor(autores: str) -> str:
@@ -248,8 +313,9 @@ def responder_con_literatura(pregunta: str, terminos: str) -> Optional[str]:
         "hallazgos": analisis.get("hallazgos_clave"),
     }
     prompt = (
-        "Eres una docente de traumatología que responde EN VOZ ALTA la pregunta de un alumno. "
-        "El tema no está en el material del curso, así que respondes con un estudio científico.\n\n"
+        "Escribe la respuesta a la pregunta de un alumno, en el tono de una docente de traumatología. "
+        "Una voz sintética leerá tu texto TAL CUAL. El tema no está en el material del curso, así que "
+        "respondes con un estudio científico.\n\n"
         f"PREGUNTA: {pregunta}\n\n"
         f"ESTUDIO (autor principal: {autor or 'desconocido'}, año: {anio or 'desconocido'}):\n"
         f"{json.dumps(resumen, ensure_ascii=False)}\n\n"
@@ -257,12 +323,14 @@ def responder_con_literatura(pregunta: str, terminos: str) -> Optional[str]:
         "- Empieza diciendo que no está en el material del curso y que según un estudio "
         "de ese autor y año, y responde con lo que dice el estudio.\n"
         "- Si el estudio no responde la pregunta, dilo honestamente en una frase.\n"
-        f"- Máximo {MAX_PALABRAS} palabras, español de Chile, sin listas ni formato."
+        f"- Máximo {MAX_PALABRAS} palabras, español de Chile, sin listas ni formato.\n"
+        "- Escribe SOLO las palabras que se dicen. Nada de acotaciones ni descripciones de gestos, "
+        "postura o tono de voz, sin paréntesis de ese tipo y sin prefijos como 'Respuesta:'."
     )
     texto = _texto_de(client.messages.create(
         model=MODELO_CLASIFICADOR, max_tokens=300, messages=[{"role": "user", "content": prompt}],
     ))
-    return recortar_palabras(texto) if texto else None
+    return (texto_para_voz(texto) or None) if texto else None
 
 
 # ---------------- orquestacion ----------------
