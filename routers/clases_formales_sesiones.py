@@ -74,6 +74,14 @@ lectura publica de "cual pagina esta activa ahora" vive en un archivo
 aparte (routers/clases_formales_actual.py), sin auth, siguiendo el
 mismo patron de separar interrogador/publico que
 casos_vivo_profesor.py / casos_vivo_alumno.py.
+
+CACHE: la sesion y sus paginas se leen de memoria
+(services/cache_clases_formales.py). Cada escritura (iniciar, avanzar,
+retroceder, cerrar) guarda en memoria la fila que devuelve Supabase, asi
+la proyeccion, el mando y los alumnos ven el cambio en su proximo poll
+sin volver a consultar. El poll de asistencia tampoco consulta Supabase
+en cada llamada: habilitados se refresca cada minuto y la foto de los 15
+minutos se recuerda una vez guardada.
 """
 
 import random
@@ -86,6 +94,7 @@ from pydantic import BaseModel
 from routers.auth import sb, get_current_interrogador
 from routers.conjuntos_comun import obtener_conjunto_activo_id
 from services import cache_clases_formales
+from routers.clases_formales_actual import sesion_por_id, paginas_de
 
 router = APIRouter(prefix="/clases-formales/sesiones", tags=["clases-formales-sesiones"])
 
@@ -130,6 +139,22 @@ def _minutos_transcurridos(created_at: str) -> float:
     return (ahora - ts).total_seconds() / 60
 
 
+def _mover_a(sesion_id: str, orden: float) -> dict:
+    """Escribe la nueva pagina activa en Supabase y deja la fila devuelta
+    en memoria: el proximo poll de proyeccion/mando/alumnos ya la ve."""
+    res = (
+        sb.table("sesiones_clase")
+        .update({"pagina_actual_orden": orden})
+        .eq("id", sesion_id)
+        .execute()
+    )
+    if not res.data:
+        cache_clases_formales.invalidar_sesion(sesion_id)
+        raise HTTPException(404, "Sesion no encontrada")
+    cache_clases_formales.guardar_sesion(res.data[0])
+    return res.data[0]
+
+
 # ---------------- ENDPOINTS ----------------
 @router.post("")
 def iniciar_sesion(body: SesionIn, interrogador: dict = Depends(get_current_interrogador)):
@@ -163,6 +188,7 @@ def iniciar_sesion(body: SesionIn, interrogador: dict = Depends(get_current_inte
         "pagina_actual_orden": None,
     }).execute()
 
+    cache_clases_formales.guardar_sesion(res.data[0])
     return res.data[0]
 
 
@@ -189,10 +215,9 @@ def asistencia_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
     Ademas, si ya pasaron 15 minutos desde el inicio de la sesion y
     todavia no existe una foto del conteo, la guarda ahora mismo (unico
     insert por sesion, disparado de forma perezosa en este mismo request)."""
-    sesion = sb.table("sesiones_clase").select("id, created_at").eq("id", sesion_id).execute().data
+    sesion = sesion_por_id(sesion_id)
     if not sesion:
         raise HTTPException(404, "Sesion no encontrada")
-    sesion = sesion[0]
 
     if not cache_clases_formales.esta_cargada(sesion_id):
         filas = (
@@ -208,22 +233,31 @@ def asistencia_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
     lista = cache_clases_formales.obtener_presentes(sesion_id)
     presentes = len(lista)
 
-    conjunto_id = obtener_conjunto_activo_id()
-    total_habilitados = (
-        sb.table("alumnos")
-        .select("id", count="exact")
-        .eq("conjunto_id", conjunto_id)
-        .execute()
-        .count
-    )
+    def contar_habilitados() -> int:
+        conjunto_id = obtener_conjunto_activo_id()
+        return (
+            sb.table("alumnos")
+            .select("id", count="exact")
+            .eq("conjunto_id", conjunto_id)
+            .execute()
+            .count
+        ) or 0
 
-    if _minutos_transcurridos(sesion["created_at"]) >= MINUTOS_FOTO_ASISTENCIA:
+    # Se refresca cada minuto, no en cada poll de 2 s
+    total_habilitados = cache_clases_formales.obtener_total_habilitados(contar_habilitados)
+
+    if (
+        not cache_clases_formales.foto_ya_guardada(sesion_id)
+        and sesion.get("created_at")
+        and _minutos_transcurridos(sesion["created_at"]) >= MINUTOS_FOTO_ASISTENCIA
+    ):
         ya_guardada = sb.table("asistencia_clase").select("sesion_id").eq("sesion_id", sesion_id).execute().data
         if not ya_guardada:
             sb.table("asistencia_clase").insert({
                 "sesion_id": sesion_id,
                 "total_presentes": presentes,
             }).execute()
+        cache_clases_formales.marcar_foto_guardada(sesion_id)
 
     # "presentes" sigue siendo el NUMERO (lo usan la proyeccion y el
     # mando); la lista con nombres va aparte en "lista_presentes".
@@ -245,44 +279,22 @@ def avanzar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inte
     pagina_actual_orden a la siguiente en la secuencia -estrictamente
     hacia adelante -para volver esta retroceder_sesion-. Si ya esta en
     la ultima pagina, no hace nada (devuelve la sesion tal cual)."""
-    sesion = sb.table("sesiones_clase").select("*").eq("id", sesion_id).execute().data
+    sesion = sesion_por_id(sesion_id)
     if not sesion:
         raise HTTPException(404, "Sesion no encontrada")
-    sesion = sesion[0]
 
-    if sesion["pagina_actual_orden"] is None:
+    paginas = paginas_de(sesion["clase_formal_id"])
+    actual = sesion["pagina_actual_orden"]
+    if actual is None:
         # Todavia no ha arrancado -fija la primera pagina del contenido-
-        siguiente = (
-            sb.table("paginas_clase")
-            .select("orden")
-            .eq("clase_formal_id", sesion["clase_formal_id"])
-            .order("orden")
-            .limit(1)
-            .execute()
-            .data
-        )
+        siguiente = paginas[:1]
     else:
-        siguiente = (
-            sb.table("paginas_clase")
-            .select("orden")
-            .eq("clase_formal_id", sesion["clase_formal_id"])
-            .gt("orden", sesion["pagina_actual_orden"])
-            .order("orden")
-            .limit(1)
-            .execute()
-            .data
-        )
+        siguiente = [p for p in paginas if p["orden"] > actual][:1]
 
     if not siguiente:
         return sesion
 
-    res = (
-        sb.table("sesiones_clase")
-        .update({"pagina_actual_orden": siguiente[0]["orden"]})
-        .eq("id", sesion_id)
-        .execute()
-    )
-    return res.data[0]
+    return _mover_a(sesion_id, siguiente[0]["orden"])
 
 
 @router.patch("/{sesion_id}/retroceder")
@@ -299,35 +311,19 @@ def retroceder_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
     porque su cache vive por pagina_id y nunca se borra aqui. Despues de
     retroceder, 'Siguiente' continua desde esta pagina, porque avanzar
     siempre parte de la pagina activa."""
-    sesion = sb.table("sesiones_clase").select("*").eq("id", sesion_id).execute().data
+    sesion = sesion_por_id(sesion_id)
     if not sesion:
         raise HTTPException(404, "Sesion no encontrada")
-    sesion = sesion[0]
 
-    if sesion["pagina_actual_orden"] is None:
+    actual = sesion["pagina_actual_orden"]
+    if actual is None:
         return sesion
 
-    anterior = (
-        sb.table("paginas_clase")
-        .select("orden")
-        .eq("clase_formal_id", sesion["clase_formal_id"])
-        .lt("orden", sesion["pagina_actual_orden"])
-        .order("orden", desc=True)
-        .limit(1)
-        .execute()
-        .data
-    )
-
-    if not anterior:
+    anteriores = [p for p in paginas_de(sesion["clase_formal_id"]) if p["orden"] < actual]
+    if not anteriores:
         return sesion
 
-    res = (
-        sb.table("sesiones_clase")
-        .update({"pagina_actual_orden": anterior[0]["orden"]})
-        .eq("id", sesion_id)
-        .execute()
-    )
-    return res.data[0]
+    return _mover_a(sesion_id, anteriores[-1]["orden"])
 
 
 @router.patch("/{sesion_id}/cerrar")
@@ -337,4 +333,5 @@ def cerrar_sesion(sesion_id: str, interrogador: dict = Depends(get_current_inter
     if not res.data:
         raise HTTPException(404, "Sesion no encontrada")
 
+    cache_clases_formales.guardar_sesion(res.data[0])
     return res.data[0]
