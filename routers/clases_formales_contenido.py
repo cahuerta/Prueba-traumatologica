@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador
+from services import cache_clases_formales
 
 router = APIRouter(prefix="/clases-formales/contenido", tags=["clases-formales-contenido"])
 
@@ -85,4 +86,6 @@ def eliminar_contenido(clase_formal_id: str, interrogador: dict = Depends(get_cu
     if not res.data:
         raise HTTPException(404, "Contenido no encontrado")
 
+    # Sus paginas se borran junto con el contenido: fuera de la memoria tambien
+    cache_clases_formales.invalidar_paginas(clase_formal_id)
     return {"ok": True}
