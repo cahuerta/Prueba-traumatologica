@@ -28,6 +28,7 @@ from routers import (
     clases_formales_actual,
     clases_formales_ingreso,
     sesion_resolver,
+    clases_formales_avatar,
 )
 from db_init import inicializar_schema
 
@@ -63,9 +64,10 @@ app.include_router(clases_formales_trivia.router)
 app.include_router(clases_formales_actual.router)
 app.include_router(clases_formales_ingreso.router)
 app.include_router(sesion_resolver.router)
+app.include_router(clases_formales_avatar.router)
 
 
 @app.on_event("startup")
 def startup():
     inicializar_schema()
-    
+
