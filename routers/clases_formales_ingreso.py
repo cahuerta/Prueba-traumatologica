@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from routers.auth import sb
 from routers.conjuntos_comun import obtener_conjunto_activo_id
 from services import cache_clases_formales
+from routers.clases_formales_actual import sesion_por_id
 
 router = APIRouter(prefix="/clases-formales/ingreso", tags=["clases-formales-ingreso"])
 
@@ -52,7 +53,8 @@ def ingreso_clase(body: IngresoIn):
     if not rut:
         raise HTTPException(400, "Ingresa tu RUT o número de matrícula")
 
-    sesion = sb.table("sesiones_clase").select("id").eq("id", body.sesion_id).execute().data
+    # Desde memoria: con 90 alumnos entrando juntos al inicio, una sola consulta
+    sesion = sesion_por_id(body.sesion_id)
     if not sesion:
         raise HTTPException(404, "Sesion no encontrada")
 
