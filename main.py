@@ -29,6 +29,7 @@ from routers import (
     clases_formales_ingreso,
     sesion_resolver,
     clases_formales_avatar,
+    examen_impreso,
 )
 from db_init import inicializar_schema
 
@@ -46,6 +47,7 @@ app.include_router(preguntas.router)
 app.include_router(materiales.router)
 app.include_router(sesiones.router)
 app.include_router(examen.router)
+app.include_router(examen_impreso.router)
 app.include_router(analisis.router)
 app.include_router(documentos.router)
 app.include_router(casos_vivo_alumno.router)
@@ -70,4 +72,3 @@ app.include_router(clases_formales_avatar.router)
 @app.on_event("startup")
 def startup():
     inicializar_schema()
-
