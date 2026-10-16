@@ -6,19 +6,31 @@ alternativas las propone la IA vía /preguntas/generar-alternativas, y el
 interrogador las revisa/edita antes de guardar con POST /preguntas.
 Opcionalmente puede llevar una foto o video (ej. radiografías), subido
 al bucket "preguntas" (separado de "materiales").
+
+Además: edición de preguntas ya guardadas (PUT), filtros "por revisar" y por
+carga, y el registro de cargas desde archivo (ver scripts/importar_docx.py):
+GET /preguntas/cargas lista los lotes y POST /preguntas/cargas/{id}/desactivar
+da de baja un lote completo (solo admin).
 """
 
 import random
 import time
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File
 from pydantic import BaseModel
 
-from routers.auth import sb, get_current_interrogador
+from routers.auth import sb, get_current_interrogador, requiere_admin
 from services.claude_client import generar_alternativas
 
 router = APIRouter(prefix="/preguntas", tags=["preguntas"])
+
+COMPLEJIDADES_VALIDAS = ("basica", "intermedia", "compleja")
+REGIONES_VALIDAS = (
+    "hombro", "codo", "mano_muneca", "columna", "cadera_pelvis", "rodilla",
+    "tobillo_pie", "ortogeriatria", "imagenologia", "ciencias_basicas", "administrativo",
+)
 
 
 # ---------------- MODELOS ----------------
@@ -37,6 +49,20 @@ class PreguntaIn(BaseModel):
     explicacion: Optional[str] = None
     media_url: Optional[str] = None
     media_tipo: Optional[str] = None  # "foto" | "video"
+
+class PreguntaUpdateIn(BaseModel):
+    """Edición parcial: solo se modifican los campos que vienen en el cuerpo.
+    Para quitar la foto/video se envía media_url y media_tipo en null."""
+    region: Optional[str] = None
+    complejidad: Optional[str] = None
+    pregunta: Optional[str] = None
+    opciones: Optional[List[str]] = None
+    correcta: Optional[int] = None
+    explicacion: Optional[str] = None
+    media_url: Optional[str] = None
+    media_tipo: Optional[str] = None
+    revisar: Optional[bool] = None
+    nota_revision: Optional[str] = None
 
 
 # ---------------- GENERAR ALTERNATIVAS CON IA (no guarda nada) ----------------
@@ -101,14 +127,72 @@ def crear_preguntas_bulk(preguntas: List[PreguntaIn], interrogador: dict = Depen
     return {"insertadas": len(res.data)}
 
 @router.get("")
-def listar_preguntas(region: Optional[str] = None, interrogador: dict = Depends(get_current_interrogador)):
+def listar_preguntas(
+    region: Optional[str] = None,
+    revisar: Optional[bool] = None,
+    carga_id: Optional[str] = None,
+    interrogador: dict = Depends(get_current_interrogador),
+):
     q = sb.table("banco_preguntas").select("*, interrogadores(nombre)").eq("activo", True)
     if region:
         q = q.eq("region", region)
+    if revisar is not None:
+        q = q.eq("revisar", revisar)
+    if carga_id:
+        q = q.eq("carga_id", carga_id)
     rows = q.execute().data
     for r in rows:
         r["creado_por_nombre"] = (r.get("interrogadores") or {}).get("nombre")
+    # Orden estable: primero las de una carga en su orden original, luego el resto por fecha.
+    rows.sort(key=lambda r: (r.get("created_at") or "", r.get("numero_origen") or 0))
     return rows
+
+# ---------------- REGISTRO DE CARGAS (archivos subidos al banco) ----------------
+@router.get("/cargas")
+def listar_cargas(interrogador: dict = Depends(get_current_interrogador)):
+    cargas = sb.table("cargas_preguntas").select("*, interrogadores(nombre)").order("created_at", desc=True).execute().data
+    for c in cargas:
+        c["subido_por_nombre"] = (c.get("interrogadores") or {}).get("nombre")
+        c.pop("interrogadores", None)
+        vigentes = sb.table("banco_preguntas").select("id", count="exact").eq("carga_id", c["id"]).eq("activo", True).execute()
+        c["preguntas_activas"] = vigentes.count or 0
+    return cargas
+
+@router.post("/cargas/{carga_id}/desactivar")
+def desactivar_carga(carga_id: str, admin: dict = Depends(requiere_admin)):
+    """Da de baja TODAS las preguntas de un lote (no borra nada: quedan inactivas)."""
+    existe = sb.table("cargas_preguntas").select("id").eq("id", carga_id).execute().data
+    if not existe:
+        raise HTTPException(404, "Carga no encontrada")
+    res = sb.table("banco_preguntas").update({"activo": False}).eq("carga_id", carga_id).eq("activo", True).execute()
+    return {"ok": True, "desactivadas": len(res.data)}
+
+# ---------------- EDITAR UNA PREGUNTA YA GUARDADA ----------------
+@router.put("/{pregunta_id}")
+def actualizar_pregunta(pregunta_id: str, cambios: PreguntaUpdateIn, interrogador: dict = Depends(get_current_interrogador)):
+    datos = cambios.model_dump(exclude_unset=True)
+    if not datos:
+        raise HTTPException(400, "No hay cambios para guardar")
+
+    if "region" in datos and datos["region"] not in REGIONES_VALIDAS:
+        raise HTTPException(400, "Región inválida")
+    if "complejidad" in datos and datos["complejidad"] not in COMPLEJIDADES_VALIDAS:
+        raise HTTPException(400, "Complejidad inválida")
+    if "pregunta" in datos and not (datos["pregunta"] or "").strip():
+        raise HTTPException(400, "El enunciado no puede quedar vacío")
+    if "opciones" in datos:
+        if datos["opciones"] is None or len(datos["opciones"]) != 5 or any(not (o or "").strip() for o in datos["opciones"]):
+            raise HTTPException(400, "Deben ser exactamente 5 alternativas (A-E), ninguna vacía")
+    if "correcta" in datos and (datos["correcta"] is None or not (0 <= datos["correcta"] <= 4)):
+        raise HTTPException(400, "El índice de la respuesta correcta debe estar entre 0 y 4")
+    if "media_tipo" in datos and datos["media_tipo"] not in (None, "foto", "video"):
+        raise HTTPException(400, "Tipo de media inválido, debe ser 'foto' o 'video'")
+
+    datos["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = sb.table("banco_preguntas").update(datos).eq("id", pregunta_id).execute()
+    if not res.data:
+        raise HTTPException(404, "Pregunta no encontrada")
+    return res.data[0]
 
 @router.get("/{pregunta_id}/media")
 def obtener_media(pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
