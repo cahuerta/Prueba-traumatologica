@@ -379,3 +379,50 @@ select
   (select count(*) from descargas_materiales d where d.alumno_id = a.id) as total_descargas,
   a.conjunto_id
 from alumnos a;
+
+
+-- ============================================================
+-- CARGA DE PREGUNTAS DESDE ARCHIVO + EDICIÓN + PRUEBA IMPRESA (PDF)
+-- ============================================================
+
+-- ---------- REGISTRO DE CARGAS (cada archivo subido al banco) ----------
+create table if not exists cargas_preguntas (
+  id uuid primary key default gen_random_uuid(),
+  archivo text not null,
+  archivo_hash text,               -- SHA-256 del archivo: evita cargarlo dos veces sin querer
+  subido_por uuid references interrogadores(id),
+  total_detectadas int not null default 0,
+  insertadas int not null default 0,
+  rechazadas int not null default 0,
+  detalle_rechazadas jsonb,        -- [{numero, motivo, texto}]
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_cargas_preguntas_hash on cargas_preguntas(archivo_hash);
+
+-- Cada pregunta recuerda de qué carga vino (permite desactivar el lote completo),
+-- su número en el archivo original, y si quedó "por revisar" (depende de otra
+-- pregunta, o no tenía una única correcta en negrita).
+alter table banco_preguntas add column if not exists carga_id uuid references cargas_preguntas(id);
+alter table banco_preguntas add column if not exists numero_origen int;
+alter table banco_preguntas add column if not exists revisar boolean not null default false;
+alter table banco_preguntas add column if not exists nota_revision text;
+alter table banco_preguntas add column if not exists updated_at timestamptz;
+
+create index if not exists idx_preguntas_carga on banco_preguntas(carga_id);
+
+-- ---------- PRUEBAS IMPRESAS (una fila por folio = una copia en papel) ----------
+-- "preguntas" guarda la copia COMPLETA tal como se imprimió: preguntas ya en
+-- su orden revuelto, con las alternativas ya revueltas y el índice de la
+-- correcta según ese orden. Así la pauta de un folio siempre coincide con el
+-- papel, aunque después se edite o se desactive una pregunta del banco.
+create table if not exists examenes_impresos (
+  id uuid primary key default gen_random_uuid(),
+  folio serial unique not null,
+  titulo text not null,
+  filtros jsonb,                   -- {carga_id, region, excluir_por_revisar}
+  total_preguntas int not null,
+  preguntas jsonb not null,        -- [{pregunta_id, numero_origen, pregunta, opciones[5], correcta, media_url, media_tipo}]
+  creado_por uuid references interrogadores(id),
+  created_at timestamptz default now()
+);
