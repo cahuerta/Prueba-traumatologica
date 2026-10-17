@@ -230,6 +230,21 @@ def iniciar_examen(body: IniciarExamenIn):
 
     orden_opciones = instancia["orden_opciones"] or {}
     minutos_totales = PAQUETES[instancia["paquete"]]["minutos"]
+
+    # Foto de cada caso clinico: se firma UNA sola vez por caso, aqui,
+    # antes de recorrer las preguntas. Las 5 preguntas de un caso comparten
+    # el MISMO registro de casos_info, asi que si se firmara dentro del
+    # loop de preguntas, la primera reemplazaria el path por la URL firmada
+    # y la segunda intentaria firmar esa URL como si fuera un archivo
+    # (-> StorageApiError 404 "Object not found"). Firmado aqui, todas las
+    # preguntas del caso reciben la misma URL firmada.
+    for caso in casos_info.values():
+        if caso.get("media_url"):
+            firmada_caso = sb.storage.from_("casos").create_signed_url(
+                caso["media_url"], minutos_totales * 60 + 300
+            )
+            caso["media_url"] = firmada_caso.get("signedURL") or firmada_caso.get("signed_url")
+
     for q in preguntas:
         mapeo = orden_opciones.get(q["id"])
         if mapeo:
@@ -239,11 +254,6 @@ def iniciar_examen(body: IniciarExamenIn):
                 q["media_url"], minutos_totales * 60 + 300
             )
             q["media_url"] = firmada.get("signedURL") or firmada.get("signed_url")
-        if q.get("caso") and q["caso"].get("media_url"):
-            firmada_caso = sb.storage.from_("casos").create_signed_url(
-                q["caso"]["media_url"], minutos_totales * 60 + 300
-            )
-            q["caso"]["media_url"] = firmada_caso.get("signedURL") or firmada_caso.get("signed_url")
 
     return {
         "instancia_id": instancia["id"],
@@ -327,4 +337,5 @@ def registrar_salida(instancia_id: str):
         return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
 
     return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
+
     
