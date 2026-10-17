@@ -11,8 +11,13 @@ Además: edición de preguntas ya guardadas (PUT), filtros "por revisar" y por
 carga, y el registro de cargas desde archivo (ver scripts/importar_docx.py):
 GET /preguntas/cargas lista los lotes y POST /preguntas/cargas/{id}/desactivar
 da de baja un lote completo (solo admin).
+
+Carga desde Word: POST /preguntas/importar-docx/vista-previa muestra lo que se
+detectó en el .docx (no guarda nada) y POST /preguntas/importar-docx lo guarda
+(ver services/importar_docx.py para las reglas de lectura).
 """
 
+import hashlib
 import random
 import time
 from datetime import datetime, timezone
@@ -23,6 +28,7 @@ from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador, requiere_admin
 from services.claude_client import generar_alternativas
+from services.importar_docx import extraer_preguntas, huella_archivo
 
 router = APIRouter(prefix="/preguntas", tags=["preguntas"])
 
@@ -167,6 +173,123 @@ def desactivar_carga(carga_id: str, admin: dict = Depends(requiere_admin)):
     res = sb.table("banco_preguntas").update({"activo": False}).eq("carga_id", carga_id).eq("activo", True).execute()
     return {"ok": True, "desactivadas": len(res.data)}
 
+# ---------------- CARGA DE PREGUNTAS DESDE UN WORD (.docx) ----------------
+def _leer_docx(archivo: UploadFile):
+    nombre = archivo.filename or "examen.docx"
+    if not nombre.lower().endswith(".docx"):
+        raise HTTPException(400, "El archivo debe ser un Word (.docx)")
+    contenido = archivo.file.read()
+    if not contenido:
+        raise HTTPException(400, "El archivo está vacío")
+    try:
+        preguntas, anomalias = extraer_preguntas(contenido)
+    except Exception:
+        raise HTTPException(400, "No se pudo leer el Word. ¿Está dañado o no es un .docx?")
+    return nombre, contenido, preguntas, anomalias
+
+
+def _carga_previa(huella: str):
+    filas = sb.table("cargas_preguntas").select("id, created_at, insertadas").eq("archivo_hash", huella).execute().data
+    return filas[0] if filas else None
+
+
+@router.post("/importar-docx/vista-previa")
+def importar_docx_vista_previa(archivo: UploadFile = File(...), interrogador: dict = Depends(get_current_interrogador)):
+    """Lee el Word y muestra lo detectado. NO guarda nada."""
+    nombre, contenido, preguntas, anomalias = _leer_docx(archivo)
+    return {
+        "archivo": nombre,
+        "ya_cargado": _carga_previa(huella_archivo(contenido)),
+        "total_detectadas": len(preguntas) + len(anomalias),
+        "anomalias": anomalias,
+        "preguntas": [
+            {
+                "numero": q["numero"], "pregunta": q["pregunta"], "opciones": q["opciones"],
+                "correcta": q["correcta"], "region": q["region"], "n_imagenes": len(q["imagenes"]),
+                "revisar": q["revisar"], "nota_revision": q["nota_revision"],
+            }
+            for q in preguntas
+        ],
+    }
+
+
+@router.post("/importar-docx")
+def importar_docx_guardar(
+    archivo: UploadFile = File(...),
+    forzar: bool = Form(False),
+    interrogador: dict = Depends(get_current_interrogador),
+):
+    """Guarda en el banco las preguntas del Word: complejidad 'basica', región
+    por palabras clave, imágenes al bucket "preguntas", y deja el registro de
+    la carga (cargas_preguntas) para poder desactivar el lote completo."""
+    nombre, contenido, preguntas, anomalias = _leer_docx(archivo)
+    huella = huella_archivo(contenido)
+
+    if _carga_previa(huella) and not forzar:
+        raise HTTPException(409, "Este archivo ya fue cargado antes. Marca la opción de cargarlo de nuevo si es lo que quieres.")
+
+    # Una pregunta sin correcta detectada no se puede guardar (es obligatoria): queda como rechazada.
+    guardables = [q for q in preguntas if q["correcta"] is not None]
+    rechazadas = [
+        {"numero": q["numero"], "motivo": "sin alternativa correcta detectada", "texto": q["pregunta"][:120]}
+        for q in preguntas if q["correcta"] is None
+    ] + anomalias
+    if not guardables:
+        raise HTTPException(400, "No se detectó ninguna pregunta válida en el archivo")
+
+    # Imágenes: se sube una sola vez cada imagen distinta (varias preguntas pueden compartirla).
+    rutas = {}
+    marca = int(time.time())
+    for q in guardables:
+        if q["imagenes"]:
+            datos, content_type, ext = q["imagenes"][0]
+            h = hashlib.sha1(datos).hexdigest()[:10]
+            if h not in rutas:
+                ruta = f"{marca}-import-{h}.{ext}"
+                sb.storage.from_("preguntas").upload(ruta, datos, {"content-type": content_type})
+                rutas[h] = ruta
+            q["_ruta"] = rutas[h]
+
+    carga = sb.table("cargas_preguntas").insert({
+        "archivo": nombre,
+        "archivo_hash": huella,
+        "subido_por": interrogador["sub"],
+        "total_detectadas": len(preguntas) + len(anomalias),
+        "insertadas": 0,
+        "rechazadas": len(rechazadas),
+        "detalle_rechazadas": rechazadas,
+    }).execute().data[0]
+
+    filas = [
+        {
+            "region": q["region"],
+            "complejidad": "basica",
+            "pregunta": q["pregunta"],
+            "opciones": q["opciones"],
+            "correcta": q["correcta"],
+            "media_url": q.get("_ruta"),
+            "media_tipo": "foto" if q.get("_ruta") else None,
+            "creado_por": interrogador["sub"],
+            "carga_id": carga["id"],
+            "numero_origen": q["numero"],
+            "revisar": q["revisar"],
+            "nota_revision": q["nota_revision"],
+        }
+        for q in guardables
+    ]
+    try:
+        sb.table("banco_preguntas").insert(filas).execute()
+    except Exception:
+        sb.table("cargas_preguntas").delete().eq("id", carga["id"]).execute()
+        raise HTTPException(500, "No se pudieron guardar las preguntas. No quedó nada cargado.")
+
+    sb.table("cargas_preguntas").update({"insertadas": len(filas)}).eq("id", carga["id"]).execute()
+    return {
+        "carga_id": carga["id"], "insertadas": len(filas), "rechazadas": len(rechazadas),
+        "detalle_rechazadas": rechazadas, "por_revisar": sum(1 for f in filas if f["revisar"]),
+    }
+
+
 # ---------------- EDITAR UNA PREGUNTA YA GUARDADA ----------------
 @router.put("/{pregunta_id}")
 def actualizar_pregunta(pregunta_id: str, cambios: PreguntaUpdateIn, interrogador: dict = Depends(get_current_interrogador)):
@@ -209,3 +332,4 @@ def obtener_media(pregunta_id: str, interrogador: dict = Depends(get_current_int
 def borrar_pregunta(pregunta_id: str, interrogador: dict = Depends(get_current_interrogador)):
     sb.table("banco_preguntas").update({"activo": False}).eq("id", pregunta_id).execute()
     return {"ok": True}
+    
