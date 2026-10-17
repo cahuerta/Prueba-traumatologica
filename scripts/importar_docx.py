@@ -1,37 +1,22 @@
 """
-scripts/importar_docx.py
-Importación ÚNICA de un examen en Word (.docx) al banco de preguntas.
+services/importar_docx.py
+Lector de exámenes en Word (.docx) para cargar preguntas al banco.
 
-Qué hace:
-  - Lee las preguntas (enunciado + 5 alternativas) del documento.
+Lo usa routers/preguntas.py (carga desde la página de administración).
+
+Reglas de lectura:
+  - Una pregunta = enunciado + 5 alternativas.
   - La respuesta correcta es la alternativa escrita en NEGRITA.
-  - Las imágenes (radiografías) se suben al bucket privado "preguntas" y
-    quedan asociadas a su pregunta (media_tipo = "foto").
-  - Todas las preguntas entran con complejidad "basica"; la región se
+  - Las imágenes (radiografías) del enunciado quedan asociadas a su pregunta.
+  - Todas las preguntas se proponen con complejidad "basica"; la región se
     asigna por palabras clave (se corrige después al editar).
   - Las preguntas que dependen de otra ("la pregunta anterior", "en este
-    caso") entran marcadas como "por revisar" con una nota.
-  - Deja un registro en la tabla cargas_preguntas (archivo, quién, fecha,
-    cuántas entraron y cuántas se rechazaron) y cada pregunta guarda su
-    carga_id, para poder desactivar el lote completo.
-
-Uso (desde la carpeta del backend):
-  python scripts/importar_docx.py archivo.docx
-      -> SOLO MUESTRA lo detectado, no guarda nada.
-  python scripts/importar_docx.py archivo.docx --guardar --rut 12345678-9
-      -> guarda. --rut es el RUT del interrogador que sube el archivo.
-  Agregar --forzar para volver a cargar un archivo idéntico ya cargado.
-
-Variables de entorno necesarias (solo para --guardar):
-  SUPABASE_URL, SUPABASE_SERVICE_KEY
+    caso") quedan marcadas como "por revisar", con una nota.
 """
 
-import argparse
 import hashlib
-import os
+import io
 import re
-import sys
-import time
 
 import docx
 from docx.oxml.ns import qn
@@ -176,8 +161,16 @@ def _region(texto):
     return "ciencias_basicas"
 
 
-def extraer_preguntas(ruta):
-    doc = docx.Document(ruta)
+def huella_archivo(contenido: bytes) -> str:
+    """SHA-256 del archivo: sirve para avisar si ya fue cargado."""
+    return hashlib.sha256(contenido).hexdigest()
+
+
+def extraer_preguntas(contenido: bytes):
+    """Lee el .docx (bytes) y devuelve (preguntas, anomalias).
+    Cada pregunta: {numero, pregunta, opciones[5], correcta (0-4 o None),
+    imagenes[(bytes, content_type, ext)], revisar, nota_revision, region}."""
+    doc = docx.Document(io.BytesIO(contenido))
     elems = _elementos(doc)
 
     # El título del examen y todo lo anterior al primer enunciado se ignora.
@@ -251,8 +244,7 @@ def extraer_preguntas(ruta):
             q["imagenes"] = list(previa["imagenes"])
             nota += " Se copió la imagen de la pregunta anterior; agrega el contexto al enunciado si hace falta."
         q["nota_revision"] = (q["nota_revision"] + " " if q["nota_revision"] else "") + nota
-    with open(ruta, "rb") as f:
-        huella = hashlib.sha256(f.read()).hexdigest()
+    huella = huella_archivo(contenido)
     for numero, region in AJUSTES_REGION.get(huella[:12], {}).items():
         for q in preguntas:
             if q["numero"] == numero:
@@ -260,110 +252,4 @@ def extraer_preguntas(ruta):
     for q in preguntas:
         assert q["region"] in REGIONES_VALIDAS, q["region"]
     return preguntas, anomalias
-
-
-# ---------------- PRESENTACIÓN ----------------
-def mostrar(preguntas, anomalias):
-    letras = "ABCDE"
-    print(f"\nPreguntas detectadas: {len(preguntas)}   Anomalías: {len(anomalias)}\n")
-    for q in preguntas:
-        corr = letras[q["correcta"]] if q["correcta"] is not None else "?"
-        marca = " [POR REVISAR]" if q["revisar"] else ""
-        img = f" [{len(q['imagenes'])} img]" if q["imagenes"] else ""
-        print(f"#{q['numero']:>2} {q['region']:<16} correcta={corr}{img}{marca}")
-        print(f"     {q['pregunta'][:110]}")
-        if q["nota_revision"]:
-            print(f"     > {q['nota_revision']}")
-    for a in anomalias:
-        print(f"ANOMALÍA #{a['numero']}: {a['motivo']} — {a['texto']}")
-    print()
-
-
-# ---------------- GUARDADO ----------------
-def guardar(ruta, preguntas, anomalias, rut, forzar):
-    from supabase import create_client
-
-    sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
-
-    interrogador = sb.table("interrogadores").select("id, nombre").eq("rut", rut).execute().data
-    if not interrogador:
-        sys.exit(f"No existe un interrogador con RUT {rut}.")
-    interrogador = interrogador[0]
-
-    with open(ruta, "rb") as f:
-        huella = hashlib.sha256(f.read()).hexdigest()
-
-    previa = sb.table("cargas_preguntas").select("id, created_at").eq("archivo_hash", huella).execute().data
-    if previa and not forzar:
-        sys.exit(f"Este archivo ya fue cargado el {previa[0].get('created_at')}. Usa --forzar para repetirlo.")
-
-    # Una pregunta sin correcta detectada no puede guardarse (correcta es
-    # obligatoria en la tabla): se registra como rechazada.
-    guardables = [q for q in preguntas if q["correcta"] is not None]
-    rechazadas = [
-        {"numero": q["numero"], "motivo": "sin alternativa correcta detectada", "texto": q["pregunta"][:120]}
-        for q in preguntas if q["correcta"] is None
-    ] + anomalias
-
-    carga = sb.table("cargas_preguntas").insert({
-        "archivo": os.path.basename(ruta),
-        "archivo_hash": huella,
-        "subido_por": interrogador["id"],
-        "total_detectadas": len(preguntas) + len(anomalias),
-        "insertadas": 0,
-        "rechazadas": len(rechazadas),
-        "detalle_rechazadas": rechazadas,
-    }).execute().data[0]
-    carga_id = carga["id"]
-
-    insertadas = 0
-    for q in guardables:
-        media_url = media_tipo = None
-        if q["imagenes"]:
-            data, ct, ext = q["imagenes"][0]
-            media_url = f"{int(time.time())}-import-{carga_id[:8]}-p{q['numero']}.{ext}"
-            sb.storage.from_("preguntas").upload(media_url, data, {"content-type": ct})
-            media_tipo = "foto"
-        sb.table("banco_preguntas").insert({
-            "region": q["region"],
-            "complejidad": "basica",
-            "pregunta": q["pregunta"],
-            "opciones": q["opciones"],
-            "correcta": q["correcta"],
-            "media_url": media_url,
-            "media_tipo": media_tipo,
-            "creado_por": interrogador["id"],
-            "carga_id": carga_id,
-            "numero_origen": q["numero"],
-            "revisar": q["revisar"],
-            "nota_revision": q["nota_revision"],
-        }).execute()
-        insertadas += 1
-
-    sb.table("cargas_preguntas").update({"insertadas": insertadas}).eq("id", carga_id).execute()
-    print(f"Listo. Carga {carga_id}: {insertadas} preguntas insertadas, {len(rechazadas)} rechazadas.")
-    for r in rechazadas:
-        print(f"  rechazada #{r['numero']}: {r['motivo']}")
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Importa un examen en Word al banco de preguntas.")
-    ap.add_argument("archivo")
-    ap.add_argument("--guardar", action="store_true", help="guarda en la base (sin esto solo muestra)")
-    ap.add_argument("--rut", help="RUT del interrogador que sube el archivo (obligatorio con --guardar)")
-    ap.add_argument("--forzar", action="store_true", help="repite la carga de un archivo ya cargado")
-    args = ap.parse_args()
-
-    preguntas, anomalias = extraer_preguntas(args.archivo)
-    mostrar(preguntas, anomalias)
-
-    if args.guardar:
-        if not args.rut:
-            sys.exit("Falta --rut con el RUT del interrogador que sube el archivo.")
-        guardar(args.archivo, preguntas, anomalias, args.rut, args.forzar)
-    else:
-        print("(Vista previa: no se guardó nada. Agrega --guardar --rut <RUT> para guardar.)")
-
-
-if __name__ == "__main__":
-    main()
+  
