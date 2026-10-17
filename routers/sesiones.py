@@ -9,17 +9,51 @@ Los alumnos ya no se cargan por sesión: el listado vive en el conjunto
 activo (ver routers/alumnos.py y routers/conjuntos.py). Cualquier RUT
 que este dentro del conjunto activo puede marcar asistencia en
 cualquier sesión.
+
+Pase del alumno: al ingresar con nombre + RUT/matrícula (POST
+/{sesion_id}/asistencia) el alumno se valida UNA sola vez y recibe un
+"pase" firmado, válido solo para esa sesión y ese alumno. Con ese pase la
+pantalla de espera consulta GET /{sesion_id}/estado-alumno (solo devuelve
+el estado de la sesión, nunca preguntas) sin volver a la base de datos a
+revalidarlo. El pase se firma con una clave DISTINTA a la del login de
+profesores, así que no sirve como token de profesor.
 """
 
+import hashlib
+import time
+
+import jwt
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from routers.auth import sb, get_current_interrogador, requiere_admin
+from routers.auth import sb, get_current_interrogador, requiere_admin, JWT_SECRET, JWT_ALGO
 from routers.conjuntos_comun import obtener_conjunto_activo_id
 
 router = APIRouter(prefix="/sesiones", tags=["sesiones"])
 
 PAQUETES = ("agil", "estandar", "exigente")
+
+# Clave propia del pase de alumno, derivada del secreto del proyecto pero
+# distinta a la del login de profesores (un pase NO valida como profesor).
+_CLAVE_PASE_ALUMNO = hashlib.sha256(f"{JWT_SECRET}|pase-alumno".encode()).hexdigest()
+_DURACION_PASE_SEG = 12 * 3600  # cubre la jornada completa del examen
+
+
+def _crear_pase_alumno(sesion_id: str, alumno_id: str) -> str:
+    ahora = int(time.time())
+    payload = {"tipo": "pase_alumno", "sesion_id": sesion_id, "alumno_id": alumno_id,
+               "iat": ahora, "exp": ahora + _DURACION_PASE_SEG}
+    return jwt.encode(payload, _CLAVE_PASE_ALUMNO, algorithm=JWT_ALGO)
+
+
+def _validar_pase_alumno(pase: str, sesion_id: str) -> dict:
+    try:
+        payload = jwt.decode(pase, _CLAVE_PASE_ALUMNO, algorithms=[JWT_ALGO])
+    except jwt.PyJWTError:
+        raise HTTPException(401, "Tu ingreso expiró o no es válido. Vuelve a ingresar con tu nombre y RUT o matrícula.")
+    if payload.get("tipo") != "pase_alumno" or payload.get("sesion_id") != sesion_id:
+        raise HTTPException(401, "Este ingreso no corresponde a esta sesión. Vuelve a ingresar.")
+    return payload
 
 
 # ---------------- MODELOS ----------------
@@ -78,7 +112,19 @@ def marcar_asistencia(sesion_id: str, body: AsistenciaIn):
     sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
     sb.table("asistencia").upsert({"sesion_id": sesion_id, "alumno_id": alumno_id}).execute()
 
-    return {"ok": True, "alumno_id": alumno_id}
+    return {"ok": True, "alumno_id": alumno_id, "pase": _crear_pase_alumno(sesion_id, alumno_id)}
+
+@router.get("/{sesion_id}/estado-alumno")
+def estado_para_alumno(sesion_id: str, pase: str):
+    """Estado de la sesión para la pantalla de espera del alumno. Exige el
+    pase entregado al ingresar (va en la URL, ?pase=..., para que el GET
+    siga siendo "simple" y no genere preflight en cada consulta). Solo
+    devuelve el estado: nunca preguntas ni datos del examen."""
+    _validar_pase_alumno(pase, sesion_id)
+    filas = sb.table("sesiones_examen").select("estado").eq("id", sesion_id).execute().data
+    if not filas:
+        raise HTTPException(404, "Sesión no encontrada")
+    return {"estado": filas[0]["estado"]}
 
 @router.get("/{sesion_id}/asistencia")
 def ver_asistencia(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
@@ -192,4 +238,5 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
-            
+
+    
