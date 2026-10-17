@@ -14,6 +14,12 @@ caso se mantiene INTACTO y en su orden original (1-5) para dar contexto
 mezclan las alternativas de cada pregunta individual, igual que las del
 banco. Cada pregunta de caso vale lo mismo que una pregunta "basica":
 se re-normalizan todas juntas a 100 (no son puntos bono aparte).
+
+Volver a entrar (recarga, gesto "atras", se cerro el navegador): /iniciar
+devuelve la MISMA instancia, con las respuestas ya guardadas traducidas a
+la posicion que ve el alumno, el tiempo que realmente le queda (desde
+iniciado_at) y las salidas ya registradas, para que el alumno siga donde
+estaba. Si el examen ya fue finalizado, devuelve solo el resultado.
 """
 
 import random
@@ -168,6 +174,16 @@ def iniciar_examen(body: IniciarExamenIn):
     existente = sb.table("examen_instancia").select("*").eq("sesion_id", body.sesion_id).eq("alumno_id", body.alumno_id).execute().data
     if existente:
         instancia = existente[0]
+        # Examen ya cerrado: no se vuelve a mostrar, solo su resultado.
+        if instancia["finalizado_at"]:
+            return {
+                "finalizado": True,
+                "resultado": {
+                    "puntaje_total": float(instancia["puntaje_total"] or 0),
+                    "porcentaje": float(instancia["porcentaje"] or 0),
+                    "nota": float(instancia["nota"] or 0),
+                },
+            }
     else:
         paquete = sesion["paquete_elegido"]
         modo_test = _conjunto_activo_es_test()
@@ -260,8 +276,35 @@ def iniciar_examen(body: IniciarExamenIn):
         "paquete": instancia["paquete"],
         "minutos_totales": minutos_totales,
         "iniciado_at": instancia["iniciado_at"],
+        "segundos_restantes": _segundos_restantes(instancia["iniciado_at"], minutos_totales),
+        "respuestas": _respuestas_guardadas(instancia["id"], orden_opciones),
+        "salidas_detectadas": instancia.get("salidas_detectadas") or 0,
         "preguntas": preguntas,
     }
+
+
+def _segundos_restantes(iniciado_at, minutos_totales: int):
+    """Tiempo que realmente le queda al alumno, contado desde su primera
+    respuesta (iniciado_at). None si todavia no responde nada (el reloj
+    aun no parte)."""
+    if not iniciado_at:
+        return None
+    inicio = datetime.fromisoformat(str(iniciado_at).replace("Z", "+00:00"))
+    transcurridos = (datetime.now(timezone.utc) - inicio).total_seconds()
+    return max(0, int(minutos_totales * 60 - transcurridos))
+
+
+def _respuestas_guardadas(instancia_id: str, orden_opciones: dict):
+    """{pregunta_id: posicion_mostrada} de lo que el alumno ya respondio.
+    En la base se guarda el indice ORIGINAL de la alternativa; aqui se
+    traduce de vuelta a la posicion que el alumno ve (orden mezclado)."""
+    filas = sb.table("respuestas").select("pregunta_id, opcion_elegida").eq("examen_instancia_id", instancia_id).execute().data
+    filas += sb.table("respuestas_caso").select("pregunta_id, opcion_elegida").eq("examen_instancia_id", instancia_id).execute().data
+    respuestas = {}
+    for r in filas:
+        mapeo = orden_opciones.get(r["pregunta_id"])
+        respuestas[r["pregunta_id"]] = mapeo.index(r["opcion_elegida"]) if mapeo else r["opcion_elegida"]
+    return respuestas
 
 @router.post("/{instancia_id}/responder")
 def responder(instancia_id: str, body: ResponderIn):
@@ -337,5 +380,6 @@ def registrar_salida(instancia_id: str):
         return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
 
     return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
+
 
     
