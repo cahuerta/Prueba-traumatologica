@@ -3,8 +3,11 @@ Backend — Examen Musculoesquelético
 main.py — organiza la app, monta los routers, y aplica schema.sql al arrancar.
 """
 
-from fastapi import FastAPI
+import traceback
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from routers import (
     auth,
@@ -34,6 +37,23 @@ from routers import (
 from db_init import inicializar_schema
 
 app = FastAPI(title="Examen Musculoesquelético API")
+
+
+# Errores internos con su mensaje real. Se registra ANTES que CORS para que
+# quede por dentro de él: así la respuesta de error sale con los permisos
+# CORS y el navegador muestra el mensaje verdadero, en vez de
+# "Failed to fetch". El detalle completo queda también en el log de Render.
+@app.middleware("http")
+async def errores_con_mensaje(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        print(f"[ERROR] {request.method} {request.url.path}\n{traceback.format_exc()}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Error interno en {request.url.path}: {type(e).__name__}: {e}"},
+        )
+
 
 app.add_middleware(
     CORSMiddleware,
