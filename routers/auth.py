@@ -12,15 +12,42 @@ Variables de entorno esperadas (Render):
 import os
 
 import bcrypt
+import httpx
 import jwt
 from fastapi import APIRouter, HTTPException, Depends, Header
+from postgrest._sync.client import SyncPostgrestClient
 from pydantic import BaseModel
+from storage3._sync.client import SyncStorageClient
 from supabase import create_client, Client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGO = "HS256"
+
+
+# ---------------- CONEXIÓN CON SUPABASE: HTTP/1.1 ----------------
+# supabase-py 2.15.1 crea sus conexiones de base de datos (postgrest) y de
+# Storage con http2=True fijo, sin opción para cambiarlo. Con HTTP/2 la
+# conexión queda abierta para reutilizarse; si pasa un rato sin uso,
+# Supabase la cierra por su lado, la librería no lo detecta y la siguiente
+# consulta falla con "RemoteProtocolError: Server disconnected" (visto en
+# /examen/iniciar y en la Presentación en vivo). Con HTTP/1.1, antes de
+# reutilizar una conexión se comprueba si sigue viva y, si Supabase la
+# cerró, se abre una nueva. Mismas consultas, misma clave, mismo Supabase.
+def _sesion_http11(self, base_url, headers, timeout, verify=True, proxy=None):
+    return httpx.Client(
+        base_url=base_url,
+        headers=headers,
+        timeout=timeout,
+        verify=bool(verify),
+        proxy=proxy,
+        follow_redirects=True,
+        http2=False,
+    )
+
+SyncPostgrestClient.create_session = _sesion_http11
+SyncStorageClient._create_session = _sesion_http11
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -112,4 +139,4 @@ def crear_interrogador(body: CrearInterrogadorIn, admin: dict = Depends(requiere
 @router.get("/me")
 def me(interrogador: dict = Depends(get_current_interrogador)):
     return interrogador
-  
+
