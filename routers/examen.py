@@ -326,10 +326,13 @@ def responder(instancia_id: str, body: ResponderIn):
     correcta = correcta_idx == opcion_original
 
     tabla = "respuestas" if origen == "banco" else "respuestas_caso"
+    # on_conflict: una respuesta se identifica por (examen, pregunta). Sin
+    # esto el upsert intenta INSERTAR una fila nueva al cambiar la respuesta
+    # y choca con el unique (examen_instancia_id, pregunta_id).
     sb.table(tabla).upsert({
         "examen_instancia_id": instancia_id, "pregunta_id": body.pregunta_id,
         "opcion_elegida": opcion_original, "correcta": correcta,
-    }).execute()
+    }, on_conflict="examen_instancia_id,pregunta_id").execute()
     return {"correcta": correcta}
 
 @router.post("/{instancia_id}/finalizar")
@@ -380,6 +383,7 @@ def registrar_salida(instancia_id: str):
         return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
 
     return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
+
 
 
     
