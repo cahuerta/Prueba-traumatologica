@@ -178,6 +178,16 @@ create table if not exists examen_instancia (
   unique (sesion_id, alumno_id)
 );
 
+-- La sesión queda amarrada al conjunto activo con que se creó (no cambia si
+-- después se activa otro), y guarda su ventana de tiempo: el examen parte para
+-- todos al cerrar la encuesta (iniciada_at) y termina a la misma hora para
+-- todos (termina_at = iniciada_at + minutos del paquete). Al llegar termina_at,
+-- o antes si terminan todos los alumnos que ingresaron, la sesión se finaliza.
+alter table sesiones_examen add column if not exists conjunto_id uuid references conjuntos(id);
+alter table sesiones_examen add column if not exists iniciada_at timestamptz;
+alter table sesiones_examen add column if not exists termina_at timestamptz;
+alter table sesiones_examen add column if not exists finalizada_at timestamptz;
+
 alter table examen_instancia add column if not exists orden_opciones jsonb;
 alter table examen_instancia add column if not exists salidas_detectadas int default 0;
 
