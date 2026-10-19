@@ -6,9 +6,12 @@ vivo, y la tabla de resultados con el detalle de cada pregunta
 respondida.
 
 Los alumnos ya no se cargan por sesión: el listado vive en el conjunto
-activo (ver routers/alumnos.py y routers/conjuntos.py). Cualquier RUT
-que este dentro del conjunto activo puede marcar asistencia en
-cualquier sesión.
+(ver routers/alumnos.py y routers/conjuntos.py). Cada sesión guarda el
+conjunto que estaba activo al crearla, y solo los alumnos de ESE conjunto
+pueden ingresar, aunque después se active otro.
+
+Horario: al cerrar la encuesta el examen parte para todos y se fija su
+hora de término (ver routers/examen.py: cierre único programado).
 
 Pase del alumno: al ingresar con nombre + RUT/matrícula (POST
 /{sesion_id}/asistencia) el alumno se valida UNA sola vez y recibe un
@@ -21,6 +24,7 @@ profesores, así que no sirve como token de profesor.
 
 import hashlib
 import time
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import APIRouter, HTTPException, Depends
@@ -28,6 +32,7 @@ from pydantic import BaseModel
 
 from routers.auth import sb, get_current_interrogador, requiere_admin, JWT_SECRET, JWT_ALGO
 from routers.conjuntos_comun import obtener_conjunto_activo_id
+from routers.examen import minutos_del_paquete, programar_cierre_sesion
 
 router = APIRouter(prefix="/sesiones", tags=["sesiones"])
 
@@ -73,10 +78,12 @@ class AsistenciaIn(BaseModel):
 # ---------------- CREACIÓN Y LISTADO DE SESIONES (admin) ----------------
 @router.post("")
 def crear_sesion(s: SesionIn, admin: dict = Depends(requiere_admin)):
-    """La sesión ya no recibe ni crea alumnos: cualquier alumno del
-    conjunto activo puede marcar asistencia en ella."""
+    """La sesión ya no recibe ni crea alumnos. Queda amarrada al conjunto
+    activo AL CREARLA: solo los alumnos de ese conjunto pueden ingresar, y
+    no cambia aunque después se active otro conjunto."""
     res = sb.table("sesiones_examen").insert({
-        "nombre": s.nombre, "fecha": s.fecha, "estado": "creada", "creado_por": admin["sub"]
+        "nombre": s.nombre, "fecha": s.fecha, "estado": "creada", "creado_por": admin["sub"],
+        "conjunto_id": obtener_conjunto_activo_id(),
     }).execute()
     return res.data[0]
 
@@ -92,7 +99,17 @@ def ver_sesion(sesion_id: str, interrogador: dict = Depends(get_current_interrog
     return res
 
 
-# ---------------- ASISTENCIA (ingreso por nombre + RUT, contra el conjunto activo) ----------------
+def _conjunto_de_la_sesion(sesion_id: str) -> str:
+    """Conjunto guardado en la sesión al crearla (no el activo ahora)."""
+    filas = sb.table("sesiones_examen").select("conjunto_id").eq("id", sesion_id).execute().data
+    if not filas:
+        raise HTTPException(404, "Sesión no encontrada")
+    if not filas[0]["conjunto_id"]:
+        raise HTTPException(409, "Esta sesión se creó antes de que la sesión guardara su conjunto. Crea una sesión nueva.")
+    return filas[0]["conjunto_id"]
+
+
+# ---------------- ASISTENCIA (ingreso por nombre + RUT, contra el conjunto de la sesión) ----------------
 @router.post("/{sesion_id}/abrir-asistencia")
 def abrir_asistencia(sesion_id: str, admin: dict = Depends(requiere_admin)):
     sb.table("sesiones_examen").update({"estado": "asistencia"}).eq("id", sesion_id).execute()
@@ -100,13 +117,13 @@ def abrir_asistencia(sesion_id: str, admin: dict = Depends(requiere_admin)):
 
 @router.post("/{sesion_id}/asistencia")
 def marcar_asistencia(sesion_id: str, body: AsistenciaIn):
-    """El alumno escribe su nombre y RUT. Se corrobora contra el
-    conjunto de alumnos actualmente activo."""
-    conjunto_id = obtener_conjunto_activo_id()
+    """El alumno escribe su nombre y RUT/matrícula. Se corrobora contra el
+    conjunto de alumnos de la sesión (el que estaba activo al crearla)."""
+    conjunto_id = _conjunto_de_la_sesion(sesion_id)
 
     alumno = sb.table("alumnos").select("id").eq("rut", body.rut.strip()).eq("conjunto_id", conjunto_id).execute().data
     if not alumno:
-        raise HTTPException(403, "RUT no reconocido en el conjunto activo")
+        raise HTTPException(403, "RUT o matrícula no reconocido en el curso de esta sesión")
     alumno_id = alumno[0]["id"]
 
     sb.table("alumnos").update({"nombre": body.nombre.strip()}).eq("id", alumno_id).execute()
@@ -129,8 +146,8 @@ def estado_para_alumno(sesion_id: str, pase: str):
 @router.get("/{sesion_id}/asistencia")
 def ver_asistencia(sesion_id: str, interrogador: dict = Depends(get_current_interrogador)):
     """Consola docente: quién ha marcado asistencia hasta ahora, en vivo.
-    El total de habilitados es el tamaño del conjunto activo."""
-    conjunto_id = obtener_conjunto_activo_id()
+    El total de habilitados es el tamaño del conjunto de la sesión."""
+    conjunto_id = _conjunto_de_la_sesion(sesion_id)
 
     res = sb.table("asistencia").select("alumno_id, marcado_at, alumnos(nombre, rut)").eq("sesion_id", sesion_id).order("marcado_at").execute().data
     total = sb.table("alumnos").select("id", count="exact").eq("conjunto_id", conjunto_id).execute()
@@ -162,12 +179,27 @@ def ver_encuesta(sesion_id: str):
 
 @router.post("/{sesion_id}/cerrar-encuesta")
 def cerrar_encuesta(sesion_id: str, admin: dict = Depends(requiere_admin)):
+    """Cierra la encuesta y el examen PARTE PARA TODOS en este momento:
+    termina a la misma hora para todos (ahora + minutos del paquete). Se
+    programa un único cierre de la sesión para esa hora."""
+    sesion = sb.table("sesiones_examen").select("estado, paquete_elegido, termina_at").eq("id", sesion_id).execute().data
+    if not sesion:
+        raise HTTPException(404, "Sesión no encontrada")
+    if sesion[0]["estado"] in ("en_curso", "finalizada"):
+        # Ya cerrada antes: no se reinicia el horario del examen.
+        return {"paquete_elegido": sesion[0]["paquete_elegido"], "conteo": ver_encuesta(sesion_id)}
+    _conjunto_de_la_sesion(sesion_id)
+
     conteo = ver_encuesta(sesion_id)
     ganador = max(conteo, key=conteo.get)
+    ahora = datetime.now(timezone.utc)
+    termina = ahora + timedelta(minutes=minutos_del_paquete(ganador))
     sb.table("sesiones_examen").update({
-        "estado": "en_curso", "paquete_elegido": ganador
+        "estado": "en_curso", "paquete_elegido": ganador,
+        "iniciada_at": ahora.isoformat(), "termina_at": termina.isoformat(),
     }).eq("id", sesion_id).execute()
-    return {"paquete_elegido": ganador, "conteo": conteo}
+    programar_cierre_sesion(sesion_id, termina.isoformat())
+    return {"paquete_elegido": ganador, "conteo": conteo, "termina_at": termina.isoformat()}
 
 
 # ---------------- TABLA DE RESULTADOS (detalle pregunta por pregunta) ----------------
@@ -238,5 +270,3 @@ def resultados_sesion(sesion_id: str, interrogador: dict = Depends(get_current_i
         })
 
     return resultados
-
-    
