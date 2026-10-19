@@ -92,3 +92,9 @@ app.include_router(clases_formales_avatar.router)
 @app.on_event("startup")
 def startup():
     inicializar_schema()
+    # Vuelve a programar el cierre único de las sesiones de examen en curso
+    # (se pierde si el servicio se reinicia en medio de un examen).
+    try:
+        examen.reprogramar_cierres_pendientes()
+    except Exception as e:
+        print(f"[startup] ERROR reprogramando cierres de sesiones: {type(e).__name__}: {e}")
