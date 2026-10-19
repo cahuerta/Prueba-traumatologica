@@ -17,12 +17,26 @@ se re-normalizan todas juntas a 100 (no son puntos bono aparte).
 
 Volver a entrar (recarga, gesto "atras", se cerro el navegador): /iniciar
 devuelve la MISMA instancia, con las respuestas ya guardadas traducidas a
-la posicion que ve el alumno, el tiempo que realmente le queda (desde
-iniciado_at) y las salidas ya registradas, para que el alumno siga donde
-estaba. Si el examen ya fue finalizado, devuelve solo el resultado.
+la posicion que ve el alumno, el tiempo que le queda y las salidas ya
+registradas, para que el alumno siga donde estaba. Si el examen ya fue
+finalizado, devuelve solo el resultado.
+
+Tiempo y cierre de la sesion: el examen parte para TODOS al cerrar la
+encuesta (sesiones_examen.iniciada_at) y termina a la misma hora para todos
+(termina_at = iniciada_at + minutos del paquete). Al cerrar la encuesta se
+programa UN unico cierre para termina_at (programar_cierre_sesion): a esa
+hora se finalizan los examenes que sigan abiertos, con lo respondido, y la
+sesion pasa a 'finalizada'. Si todos los alumnos que ingresaron terminan
+antes, la sesion se cierra al finalizar el ultimo. Si el servicio se
+reinicia, al arrancar se vuelven a programar los cierres pendientes.
+
+Conjunto: la sesion guarda el conjunto activo con que se creo
+(sesiones_examen.conjunto_id); el examen usa ESE conjunto, aunque despues
+se active otro.
 """
 
 import random
+import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
@@ -54,15 +68,29 @@ class ResponderIn(BaseModel):
     opcion_elegida: int  # posición mostrada al alumno (ya mezclada), no el índice original
 
 
-def _conjunto_activo_es_test() -> bool:
-    """Si el conjunto activo es de tipo 'test', las cuotas del examen
+def _conjunto_es_test(conjunto_id: str) -> bool:
+    """Si el conjunto DE LA SESION es de tipo 'test', las cuotas del examen
     son flexibles (toma lo que haya disponible) en vez de exigir el
     banco completo -sirve para probar el flujo sin esperar tener las
     200 preguntas y los 4 casos clinicos completos. Esto es INDEPENDIENTE
     de que el contenido sea clinico o administrativo -eso lo decide
-    'item', no el conjunto-."""
-    fila = sb.table("conjuntos").select("tipo").eq("activo", True).execute().data
+    'item', no el conjunto-. Se usa el conjunto guardado en la sesion,
+    no el activo ahora: cambiar el conjunto activo no afecta una sesion
+    ya creada."""
+    fila = sb.table("conjuntos").select("tipo").eq("id", conjunto_id).execute().data
     return bool(fila) and fila[0]["tipo"] == "test"
+
+
+def _parse_fecha(valor):
+    return datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+
+
+def _resultado_guardado(instancia: dict) -> dict:
+    return {
+        "puntaje_total": float(instancia["puntaje_total"] or 0),
+        "porcentaje": float(instancia["porcentaje"] or 0),
+        "nota": float(instancia["nota"] or 0),
+    }
 
 
 # ---------------- HELPERS: preguntas individuales (banco) ----------------
@@ -168,25 +196,26 @@ def _info_pregunta(pregunta_id: str):
 @router.post("/iniciar")
 def iniciar_examen(body: IniciarExamenIn):
     sesion = sb.table("sesiones_examen").select("*").eq("id", body.sesion_id).single().execute().data
-    if not sesion or sesion["estado"] != "en_curso":
-        raise HTTPException(409, "La sesión no está en curso todavía")
+    if not sesion:
+        raise HTTPException(404, "Sesión no encontrada")
 
     existente = sb.table("examen_instancia").select("*").eq("sesion_id", body.sesion_id).eq("alumno_id", body.alumno_id).execute().data
+    # Examen ya cerrado (por el alumno o por el cierre de la sesion): solo su resultado.
+    if existente and existente[0]["finalizado_at"]:
+        return {"finalizado": True, "resultado": _resultado_guardado(existente[0])}
+
+    if sesion["estado"] == "finalizada":
+        raise HTTPException(409, "La sesión de examen ya terminó")
+    if sesion["estado"] != "en_curso":
+        raise HTTPException(409, "La sesión no está en curso todavía")
+    if not sesion.get("conjunto_id") or not sesion.get("termina_at"):
+        raise HTTPException(409, "Esta sesión se creó antes de que la sesión guardara su conjunto y su horario. Crea una sesión nueva.")
+
     if existente:
         instancia = existente[0]
-        # Examen ya cerrado: no se vuelve a mostrar, solo su resultado.
-        if instancia["finalizado_at"]:
-            return {
-                "finalizado": True,
-                "resultado": {
-                    "puntaje_total": float(instancia["puntaje_total"] or 0),
-                    "porcentaje": float(instancia["porcentaje"] or 0),
-                    "nota": float(instancia["nota"] or 0),
-                },
-            }
     else:
         paquete = sesion["paquete_elegido"]
-        modo_test = _conjunto_activo_es_test()
+        modo_test = _conjunto_es_test(sesion["conjunto_id"])
 
         seleccion = _seleccionar_preguntas(paquete, item=body.item, modo_test=modo_test)
         pregunta_ids = [qid for ids in seleccion.values() for qid in ids]
@@ -276,22 +305,18 @@ def iniciar_examen(body: IniciarExamenIn):
         "paquete": instancia["paquete"],
         "minutos_totales": minutos_totales,
         "iniciado_at": instancia["iniciado_at"],
-        "segundos_restantes": _segundos_restantes(instancia["iniciado_at"], minutos_totales),
+        "segundos_restantes": _segundos_restantes(sesion["termina_at"]),
         "respuestas": _respuestas_guardadas(instancia["id"], orden_opciones),
         "salidas_detectadas": instancia.get("salidas_detectadas") or 0,
         "preguntas": preguntas,
     }
 
 
-def _segundos_restantes(iniciado_at, minutos_totales: int):
-    """Tiempo que realmente le queda al alumno, contado desde su primera
-    respuesta (iniciado_at). None si todavia no responde nada (el reloj
-    aun no parte)."""
-    if not iniciado_at:
-        return None
-    inicio = datetime.fromisoformat(str(iniciado_at).replace("Z", "+00:00"))
-    transcurridos = (datetime.now(timezone.utc) - inicio).total_seconds()
-    return max(0, int(minutos_totales * 60 - transcurridos))
+def _segundos_restantes(termina_at):
+    """Tiempo que le queda al alumno: el mismo para todos, hasta la hora de
+    termino de la sesion (cierre de la encuesta + minutos del paquete)."""
+    restante = (_parse_fecha(termina_at) - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(restante))
 
 
 def _respuestas_guardadas(instancia_id: str, orden_opciones: dict):
@@ -340,7 +365,18 @@ def finalizar_examen(instancia_id: str):
     instancia = sb.table("examen_instancia").select("*").eq("id", instancia_id).single().execute().data
     if not instancia:
         raise HTTPException(404, "Examen no encontrado")
+    # Ya finalizado (p. ej. lo cerro el termino de la sesion y luego el
+    # reloj del alumno llego a cero): se devuelve lo guardado, sin recalcular.
+    if instancia["finalizado_at"]:
+        return _resultado_guardado(instancia)
 
+    resultado = _calcular_y_guardar_nota(instancia)
+    _cerrar_sesion_si_terminaron_todos(instancia["sesion_id"])
+    return resultado
+
+
+def _calcular_y_guardar_nota(instancia: dict) -> dict:
+    instancia_id = instancia["id"]
     respuestas_banco = sb.table("respuestas").select("pregunta_id, correcta").eq("examen_instancia_id", instancia_id).execute().data
     respuestas_caso = sb.table("respuestas_caso").select("pregunta_id, correcta").eq("examen_instancia_id", instancia_id).execute().data
     respuestas = respuestas_banco + respuestas_caso
@@ -363,6 +399,75 @@ def finalizar_examen(instancia_id: str):
     return {"puntaje_total": round(puntaje, 2), "porcentaje": round(porcentaje * 100, 1), "nota": round(nota, 1)}
 
 
+# ---------------- CIERRE DE LA SESION ----------------
+def _cerrar_sesion_si_terminaron_todos(sesion_id: str):
+    """Si todos los alumnos que ingresaron a la sesion ya finalizaron su
+    examen, la sesion se cierra en ese momento (sin esperar termina_at)."""
+    presentes = {a["alumno_id"] for a in sb.table("asistencia").select("alumno_id").eq("sesion_id", sesion_id).execute().data}
+    if not presentes:
+        return
+    finalizados = {
+        i["alumno_id"] for i in sb.table("examen_instancia").select("alumno_id, finalizado_at").eq("sesion_id", sesion_id).execute().data
+        if i["finalizado_at"]
+    }
+    if presentes <= finalizados:
+        cerrar_sesion(sesion_id)
+
+
+def cerrar_sesion(sesion_id: str):
+    """Finaliza los examenes que sigan abiertos (con lo respondido) y pasa
+    la sesion a 'finalizada'. Si ya estaba finalizada, no hace nada."""
+    sesion = sb.table("sesiones_examen").select("estado").eq("id", sesion_id).execute().data
+    if not sesion or sesion[0]["estado"] == "finalizada":
+        return
+    abiertas = sb.table("examen_instancia").select("*").eq("sesion_id", sesion_id).is_("finalizado_at", "null").execute().data
+    for instancia in abiertas:
+        _calcular_y_guardar_nota(instancia)
+    sb.table("sesiones_examen").update({
+        "estado": "finalizada", "finalizada_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", sesion_id).execute()
+    print(f"[examen] Sesión {sesion_id} finalizada ({len(abiertas)} exámenes cerrados al término).")
+
+
+_cierres_programados = {}  # sesion_id -> threading.Timer
+_lock_cierres = threading.Lock()
+
+
+def _ejecutar_cierre(sesion_id: str):
+    with _lock_cierres:
+        _cierres_programados.pop(sesion_id, None)
+    try:
+        cerrar_sesion(sesion_id)
+    except Exception as e:
+        print(f"[examen] ERROR cerrando la sesión {sesion_id}: {type(e).__name__}: {e}")
+
+
+def programar_cierre_sesion(sesion_id: str, termina_at):
+    """Programa UN unico cierre para la hora de termino de la sesion."""
+    segundos = (_parse_fecha(termina_at) - datetime.now(timezone.utc)).total_seconds()
+    with _lock_cierres:
+        anterior = _cierres_programados.pop(sesion_id, None)
+        if anterior:
+            anterior.cancel()
+        timer = threading.Timer(max(0, segundos), _ejecutar_cierre, args=(sesion_id,))
+        timer.daemon = True
+        _cierres_programados[sesion_id] = timer
+        timer.start()
+
+
+def reprogramar_cierres_pendientes():
+    """Al arrancar el servicio: vuelve a programar el cierre de cada sesion
+    en curso (si su hora ya paso, se cierra de inmediato)."""
+    filas = sb.table("sesiones_examen").select("id, termina_at").eq("estado", "en_curso").execute().data
+    for f in filas:
+        if f.get("termina_at"):
+            programar_cierre_sesion(f["id"], f["termina_at"])
+
+
+def minutos_del_paquete(paquete: str) -> int:
+    return PAQUETES[paquete]["minutos"]
+
+
 # ---------------- DETECCIÓN DE SALIDA (cambio de app/pestaña durante el examen) ----------------
 MAX_SALIDAS = 3
 
@@ -383,7 +488,3 @@ def registrar_salida(instancia_id: str):
         return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": True, "resultado": resultado}
 
     return {"salidas": nuevo_conteo, "max_salidas": MAX_SALIDAS, "finalizado": False}
-
-
-
-    
